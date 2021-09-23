@@ -4,7 +4,7 @@ import pytest
 
 import numpy as np
 import numpy.linalg as la
-import scipy.linalg.interpolative as sli
+import scipy.linalg.interpolative as sli    # pylint: disable=no-name-in-module
 
 from meshmode import _acf       # noqa: F401
 from arraycontext import ArrayContext

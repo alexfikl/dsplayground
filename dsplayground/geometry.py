@@ -24,9 +24,11 @@ def make_grid_points(
     ambient_dim = 2 if nz is None else 3
 
     if ambient_dim == 2:
-        points = np.mgrid[-0.5:0.5:1j*nx, -0.5:0.5:1j*ny]
+        points = np.mgrid[-0.5:0.5:1j*nx, -0.5:0.5:1j*ny]        # type: ignore[misc]
     elif ambient_dim == 3:
-        points = np.mgrid[-0.5:0.5:1j*nx, -0.5:0.5:1j*ny, -0.5:0.5:1j*nz]
+        assert nz is not None
+        points = np.mgrid[
+                -0.5:0.5:1j*nx, -0.5:0.5:1j*ny, -0.5:0.5:1j*nz]  # type: ignore[misc]
     else:
         raise ValueError(f"unsupported dimension: {ambient_dim}")
 
@@ -50,8 +52,6 @@ def make_random_points(
 def make_axis_points(
         axis: np.ndarray, npoints: int,
         ) -> np.ndarray:
-    ambient_dim, = axis.shape
-
     t = np.linspace(-0.5, 0.5, npoints)
     return t * axis.reshape(-1, 1)
 
@@ -74,12 +74,14 @@ def affine_map(x: np.ndarray, *,
         if isinstance(mat, Number):
             y = mat * y
         else:
+            assert isinstance(mat, np.ndarray)
             y = mat @ y
 
     if b is not None:
         if isinstance(b, Number):
             y = y + b
         else:
+            assert isinstance(b, np.ndarray)
             y = y + b.reshape(-1, 1)
 
     return y
