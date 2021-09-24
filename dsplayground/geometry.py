@@ -1,6 +1,8 @@
 from typing import Optional, Union
 
 import numpy as np
+import numpy.linalg as la
+
 
 from arraycontext import ArrayContext
 from pytential.source import PointPotentialSource
@@ -35,18 +37,40 @@ def make_grid_points(
     return points.reshape(points.shape[0], -1)
 
 
-def make_random_points(
-        ambient_dim: int, npoints: int, *, random: str = "uniform",
-        ) -> np.ndarray:
+def make_random_points_in_box(ambient_dim: int, npoints: int) -> np.ndarray:
     rng = np.random.default_rng()
-    if random == "uniform":
-        return -0.5 + rng.random(size=(ambient_dim, npoints))
-    elif random == "normal":
-        # NOTE: multiplying by 0.2 seems to make it sufficiently likely that
-        # all the values are in [-0.5, 0.5] for practical purposes
-        return 0.2 * rng.standard_normal(size=(ambient_dim, npoints))
+    return -0.5 + rng.random(size=(ambient_dim, npoints))
+
+
+def make_random_points_in_sphere(
+        ambient_dim: int, npoints: int, *,
+        rmin: float = 0.0, rmax: float = 1.0,
+        tmin: float = 0.0, tmax: float = 2.0 * np.pi,
+        pmin: float = 0.0, pmax: float = np.pi,
+        ) -> np.ndarray:
+    assert rmin >= 0.0 and rmax > rmin
+    assert tmin >= 0.0 and tmax <= 2.0 * np.pi and tmin < tmax
+
+    rng = np.random.default_rng()
+    theta = tmin + (tmax - tmin) * rng.random(size=npoints)
+    r = rmin + (rmax - rmin) * rng.random(size=npoints)
+
+    if ambient_dim == 2:
+        return np.stack([
+            r * np.cos(theta),
+            r * np.sin(theta)
+            ])
+    elif ambient_dim == 3:
+        assert pmin >= 0.0 and pmax <= np.pi and pmin < pmax
+
+        phi = pmin + (pmax - pmin) * rng.random(size=npoints)
+        return np.stack([
+            r * np.sin(phi) * np.cos(theta),
+            r * np.sin(phi) * np.sin(theta),
+            r * np.cos(phi)
+            ])
     else:
-        raise ValueError(f"unknown random distribution: '{random}'")
+        raise ValueError(f"unsupported dimension: {ambient_dim}")
 
 
 def make_axis_points(
@@ -56,9 +80,14 @@ def make_axis_points(
     return t * axis.reshape(-1, 1)
 
 
-def make_circle(npoints: int) -> np.ndarray:
-    theta = np.linspace(0.0, 2.0 * np.pi, npoints)
+def make_circle(npoints: int, *, endpoint: bool = False) -> np.ndarray:
+    theta = np.linspace(0.0, 2.0 * np.pi, npoints, endpoint=endpoint)
     return np.stack([np.cos(theta), np.sin(theta)])
+
+
+def make_sphere(npoints: int) -> np.ndarray:
+    from pytools import sphere_sample_fibonacci
+    return sphere_sample_fibonacci(npoints, r=1.0, optimize="average")
 
 # }}}
 
@@ -87,3 +116,15 @@ def affine_map(x: np.ndarray, *,
     return y
 
 # }}}
+
+
+# {{{
+
+def get_point_radius_and_center(points: np.ndarray) -> Union[float, np.ndarray]:
+    center = np.mean(points, axis=1)
+    radius = np.max(la.norm(points - center.reshape(-1, 1), ord=2, axis=0))
+
+    return radius, center
+
+# }}}
+

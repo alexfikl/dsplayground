@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, List
 
 import pytest
 
@@ -10,9 +10,6 @@ from meshmode import _acf       # noqa: F401
 from arraycontext import ArrayContext
 from arraycontext import pytest_generate_tests_for_array_contexts
 from meshmode.array_context import PytestPyOpenCLArrayContextFactory
-
-from pytential.source import PointPotentialSource
-from pytential.target import PointsTarget
 
 import logging
 logger = logging.getLogger(__name__)
@@ -39,33 +36,6 @@ def _make_proxies(
                 proxy_radius * ds.make_circle(nproxies),
                 b=proxy_center),
             ]
-
-
-def _evaluate_p2p(
-        actx: ArrayContext, kernel: Any,
-        targets: PointsTarget, sources: PointPotentialSource,
-        context: Optional[Dict[str, Any]] = None) -> np.ndarray:
-    if context is None:
-        context = {}
-
-    from pytential import GeometryCollection
-    places = GeometryCollection((sources, targets))
-
-    from pytential import sym
-    sym_sigma = sym.var("sigma")
-
-    from pytential.symbolic.execution import _prepare_expr
-    sym_op = sym.int_g_vec(kernel, sym_sigma, qbx_forced_limit=None)
-    sym_op = _prepare_expr(places, sym_op)
-
-    from pytential.symbolic.matrix import P2PMatrixBuilder
-    mat = P2PMatrixBuilder(actx,
-            dep_expr=sym_sigma, other_dep_exprs=[],
-            dep_source=sources, dep_discr=sources,
-            places=places, context=context,
-            exclude_self=False, _weighted=False)
-
-    return mat(sym_op)
 
 
 @pytest.mark.parametrize("geometry", ["grid", "axis"])
@@ -132,12 +102,12 @@ def test_farfield_skeletonization(
 
     # {{{ skeletonize sources
 
-    interaction_mat = _evaluate_p2p(actx, kernel, targets, sources)
+    interaction_mat = ds.evaluate_p2p(actx, kernel, targets, sources)
 
     def _reconstruction_error(
             pxy: np.ndarray, eps: float, verbose: bool = True,
             ) -> float:
-        proxy_mat = _evaluate_p2p(actx, kernel, ds.as_target(actx, pxy), sources)
+        proxy_mat = ds.evaluate_p2p(actx, kernel, ds.as_target(actx, pxy), sources)
         k, idx, proj = sli.interp_decomp(proxy_mat, eps)
 
         P = sli.reconstruct_interp_matrix(idx, proj)        # noqa: N806

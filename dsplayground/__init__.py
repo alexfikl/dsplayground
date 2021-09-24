@@ -1,13 +1,33 @@
 from dsplayground.geometry import (
-    make_grid_points, make_random_points, make_axis_points, make_circle,
+    make_grid_points, make_axis_points, make_circle, make_sphere,
+    make_random_points_in_box, make_random_points_in_sphere,
+
     as_source, as_target, affine_map,
+    get_point_radius_and_center,
+)
+from dsplayground.evaluation import (
+    evaluate_p2p,
+)
+from dsplayground.models import (
+    estimate_proxies_from_id_eps,
 )
 
 __all__ = (
-    "make_grid_points", "make_random_points", "make_axis_points", "make_circle",
+    "make_grid_points", "make_axis_points", "make_circle", "make_sphere",
+    "make_random_points_in_box", "make_random_points_in_sphere",
+
     "as_source", "as_target", "affine_map",
+    "get_point_radius_and_center",
+
+    "get_cl_array_context",
+
+    "evaluate_p2p",
+
+    "estimate_proxies_from_id_eps",
 )
 
+
+# {{{ matplotlib
 
 def _initialize_matplotlib_defaults():
     import matplotlib
@@ -35,3 +55,38 @@ def _initialize_matplotlib_defaults():
 
 
 _initialize_matplotlib_defaults()
+
+# }}}
+
+
+# {{{
+
+def get_cl_array_context(factory):
+    import pyopencl as cl
+    import pyopencl.tools
+
+    if factory is None:
+        factory = cl.create_some_context
+
+    if callable(factory):
+        return get_cl_array_context(factory())
+
+    from arraycontext import ArrayContext
+    if isinstance(factory, ArrayContext):
+        return factory
+
+    if isinstance(factory, cl.Context):
+        ctx = factory
+        queue = cl.CommandQueue(ctx)
+    elif isinstance(factory, cl.CommandQueue):
+        queue = factory
+        ctx = queue.context
+    else:
+        raise TypeError(type(factory).__name__)
+
+    from meshmode.array_context import PyOpenCLArrayContext
+    return PyOpenCLArrayContext(queue,
+            allocator=cl.tools.MemoryPool(cl.tools.ImmediateAllocator(queue)),
+            force_device_scalars=True)
+
+# }}}
