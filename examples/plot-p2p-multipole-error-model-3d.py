@@ -49,7 +49,7 @@ def main(ctx_factory, visualize: bool = True) -> None:
     # {{{ parameters
 
     ambient_dim = 3
-    nsources = 512
+    nsources = 128
     ntargets = 512
 
     proxy_radius_factor = 1.5

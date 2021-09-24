@@ -85,10 +85,15 @@ def make_circle(npoints: int, *, endpoint: bool = False) -> np.ndarray:
     return np.stack([np.cos(theta), np.sin(theta)])
 
 
-def make_sphere(npoints: int) -> np.ndarray:
-    from pytools import sphere_sample_fibonacci
-    return sphere_sample_fibonacci(npoints, r=1.0, optimize="average")
-
+def make_sphere(npoints: int, *, method: str = "equidistant") -> np.ndarray:
+    if method == "fibonacci":
+        from pytools import sphere_sample_fibonacci
+        return sphere_sample_fibonacci(npoints, r=1.0, optimize="average")
+    elif method == "equidistant":
+        from pytools import sphere_sample_equidistant
+        return sphere_sample_equidistant(npoints, r=1.0)
+    else:
+        raise ValueError(f"unknown sampling method: '{method}'")
 # }}}
 
 
