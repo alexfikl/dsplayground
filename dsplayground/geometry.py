@@ -48,8 +48,8 @@ def make_random_points_in_sphere(
         tmin: float = 0.0, tmax: float = 2.0 * np.pi,
         pmin: float = 0.0, pmax: float = np.pi,
         ) -> np.ndarray:
-    assert rmin >= 0.0 and rmax > rmin
-    assert tmin >= 0.0 and tmax <= 2.0 * np.pi and tmin < tmax
+    assert 0.0 <= rmin < rmax
+    assert 0.0 <= tmin < tmax <= 2.0 * np.pi
 
     rng = np.random.default_rng()
     theta = tmin + (tmax - tmin) * rng.random(size=npoints)
@@ -61,7 +61,7 @@ def make_random_points_in_sphere(
             r * np.sin(theta)
             ])
     elif ambient_dim == 3:
-        assert pmin >= 0.0 and pmax <= np.pi and pmin < pmax
+        assert 0.0 <= pmin < pmax <= np.pi
 
         phi = pmin + (pmax - pmin) * rng.random(size=npoints)
         return np.stack([
