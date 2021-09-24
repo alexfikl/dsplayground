@@ -55,7 +55,7 @@ def main(ctx_factory, visualize: bool = True) -> None:
     proxy_radius_factor = 1.5
 
     max_source_radius = 1.0
-    min_target_radius = 1.5
+    min_target_radius = 2.5
 
     proxy_radius = proxy_radius_factor * max_source_radius
 
@@ -141,7 +141,7 @@ def main(ctx_factory, visualize: bool = True) -> None:
     rec_errors = np.empty((id_eps_array.size,))
 
     for i, id_eps in enumerate(id_eps_array):
-        estimate_nproxies = ds.estimate_proxies_from_id_eps(id_eps,
+        estimate_nproxies = ds.estimate_proxies_from_id_eps(ambient_dim, id_eps,
                 source_radius, target_radius, proxy_radius,
                 nsources, ntargets)
 
@@ -170,6 +170,7 @@ def main(ctx_factory, visualize: bool = True) -> None:
 
     nproxy_estimate = np.empty(id_eps_array.size, dtype=np.int64)
     nproxy_model = np.empty(id_eps_array.size, dtype=np.int64)
+    id_rank = np.empty(id_eps_array.size, dtype=np.int64)
 
     for i, id_eps in enumerate(id_eps_array):
         nproxies = 8
@@ -190,6 +191,8 @@ def main(ctx_factory, visualize: bool = True) -> None:
         nproxy_model[i] = ds.estimate_proxies_from_id_eps(ambient_dim, id_eps,
                 source_radius, target_radius, proxy_radius,
                 nsources, ntargets)
+        id_rank[i] = rank
+
         logger.info("id_eps %.5e nproxy estimate %3d model %3d rank %3d / %3d",
                 id_eps, nproxy_estimate[i], nproxy_model[i], rank, ntargets)
 
@@ -197,10 +200,12 @@ def main(ctx_factory, visualize: bool = True) -> None:
         fig = mp.figure()
         ax = fig.gca()
 
-        ax.semilogx(id_eps_array, nproxy_estimate, "o-")
-        ax.semilogx(id_eps_array, nproxy_model, "ko-")
+        ax.semilogx(id_eps_array, nproxy_estimate, "o-", label="$Estimate$")
+        # ax.semilogx(id_eps_array, id_rank, "o-", label="$Rank$")
+        ax.semilogx(id_eps_array, nproxy_model, "ko-", label="$Model$")
         ax.set_xlabel(r"$\epsilon$")
         ax.set_ylabel(r"$\#~proxy$")
+        ax.legend()
 
         fig.savefig("p2p_multipole_error_model_vs_estimate")
         mp.close(fig)

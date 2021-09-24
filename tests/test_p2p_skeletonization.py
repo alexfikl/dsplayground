@@ -50,7 +50,7 @@ def test_farfield_skeletonization(
     ambient_dim = 2
     id_eps = 1.0e-10
 
-    nproxies = 32
+    nproxies = 42
     proxy_radius = 1.25
 
     nsources = ntargets = 10

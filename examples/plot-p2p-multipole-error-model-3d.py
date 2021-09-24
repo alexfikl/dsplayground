@@ -6,7 +6,6 @@ import numpy.linalg as la
 import scipy.linalg.interpolative as sli    # pylint: disable=no-name-in-module
 
 import matplotlib.pyplot as mp
-import matplotlib.patches as patch
 
 import logging
 logger = logging.getLogger(__name__)

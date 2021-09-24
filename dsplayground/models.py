@@ -22,7 +22,7 @@ def estimate_proxies_from_id_eps(
         eps = id_eps \
                 * (1.0 - rho) / (1.0 - alpha) \
                 * 2.0 * np.pi / rho \
-                * 2.0 / (2 + ntargets) / ntargets
+                * 2.0 / (2 + ntargets) / np.sqrt(ntargets)
 
         # NOTE: eps and rho are both < 1, so this should always be a positive number
         p = int(np.log(eps) / np.log(rho))
