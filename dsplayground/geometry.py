@@ -1,4 +1,4 @@
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 import numpy as np
 import numpy.linalg as la
@@ -125,7 +125,7 @@ def affine_map(x: np.ndarray, *,
 
 # {{{
 
-def get_point_radius_and_center(points: np.ndarray) -> Union[float, np.ndarray]:
+def get_point_radius_and_center(points: np.ndarray) -> Tuple[float, np.ndarray]:
     center = np.mean(points, axis=1)
     radius = np.max(la.norm(points - center.reshape(-1, 1), ord=2, axis=0))
 
