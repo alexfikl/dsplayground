@@ -1,16 +1,38 @@
-from typing import Optional, Tuple, Union
+from typing import Any, Optional, Tuple, Union
 
 import numpy as np
 import numpy.linalg as la
-
 
 from arraycontext import ArrayContext
 from pytential.source import PointPotentialSource
 from pytential.target import PointsTarget
 
 
-def as_source(actx: ArrayContext, points: np.ndarray) -> PointPotentialSource:
-    return PointPotentialSource(actx.from_numpy(points))
+# pylint: disable-next=abstract-method
+class ExpansionPointPotentialSource(PointPotentialSource):
+    def __init__(self, nodes: Any, qbx_order: int) -> None:
+        super().__init__(nodes)
+        self.qbx_order = qbx_order
+
+    def get_expansion_for_qbx_direct_eval(self, base_kernel, target_kernels):
+        from sumpy.expansion.local import LineTaylorLocalExpansion
+        from sumpy.kernel import TargetDerivativeRemover
+
+        txr = TargetDerivativeRemover()
+        if any(knl != txr(knl) for knl in target_kernels):
+            raise ValueError
+
+        return LineTaylorLocalExpansion(base_kernel, self.qbx_order)
+
+
+def as_source(
+        actx: ArrayContext, points: np.ndarray, *,
+        qbx_order: Optional[int] = None) -> PointPotentialSource:
+    points = actx.from_numpy(points)
+    if qbx_order is None:
+        return PointPotentialSource(points)
+    else:
+        return ExpansionPointPotentialSource(points, qbx_order)
 
 
 def as_target(actx: ArrayContext, points: np.ndarray) -> PointsTarget:
@@ -123,7 +145,7 @@ def affine_map(x: np.ndarray, *,
 # }}}
 
 
-# {{{
+# {{{ get_point_radius_and_center
 
 def get_point_radius_and_center(points: np.ndarray) -> Tuple[float, np.ndarray]:
     center = np.mean(points, axis=1)

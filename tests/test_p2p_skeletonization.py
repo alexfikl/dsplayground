@@ -102,12 +102,13 @@ def test_farfield_skeletonization(
 
     # {{{ skeletonize sources
 
-    interaction_mat = ds.evaluate_p2p(actx, kernel, targets, sources)
+    interaction_mat = ds.evaluate_p2p_simple(actx, kernel, targets, sources)
 
     def _reconstruction_error(
             pxy: np.ndarray, eps: float, verbose: bool = True,
             ) -> float:
-        proxy_mat = ds.evaluate_p2p(actx, kernel, ds.as_target(actx, pxy), sources)
+        proxy_mat = ds.evaluate_p2p_simple(
+                actx, kernel, ds.as_target(actx, pxy), sources)
         k, idx, proj = sli.interp_decomp(proxy_mat, eps)
 
         P = sli.reconstruct_interp_matrix(idx, proj)        # noqa: N806

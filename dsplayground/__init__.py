@@ -6,7 +6,8 @@ from dsplayground.geometry import (
     get_point_radius_and_center,
 )
 from dsplayground.evaluation import (
-    evaluate_p2p,
+    evaluate_p2p, evaluate_qbx,
+    evaluate_p2p_simple,
 )
 from dsplayground.models import (
     estimate_proxies_from_id_eps,
@@ -21,7 +22,7 @@ __all__ = (
 
     "get_cl_array_context",
 
-    "evaluate_p2p",
+    "evaluate_p2p", "evaluate_qbx", "evaluate_p2p_simple",
 
     "estimate_proxies_from_id_eps",
 )
@@ -86,7 +87,8 @@ def get_cl_array_context(factory):
 
     from meshmode.array_context import PyOpenCLArrayContext
     return PyOpenCLArrayContext(queue,
-            allocator=cl.tools.MemoryPool(cl.tools.ImmediateAllocator(queue)),
+            # allocator=cl.tools.MemoryPool(cl.tools.ImmediateAllocator(queue)),
+            allocator=None,
             force_device_scalars=True)
 
 # }}}

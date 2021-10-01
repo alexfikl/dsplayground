@@ -123,7 +123,7 @@ def main(ctx_factory, visualize: bool = True) -> None:
 
     from sumpy.kernel import LaplaceKernel
     kernel = LaplaceKernel(ambient_dim)
-    kernel = partial(ds.evaluate_p2p, actx, kernel)
+    kernel = partial(ds.evaluate_p2p_simple, actx, kernel)
 
     interaction_mat = kernel(targets, sources)
 
