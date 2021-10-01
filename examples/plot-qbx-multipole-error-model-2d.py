@@ -53,10 +53,12 @@ def main(ctx_factory, visualize: bool = True) -> None:
 
     nelements = 64
     target_order = 16
-    qbx_order = 4
+    qbx_order = 12
 
     proxy_radius_factor = 1.25
     nblocks = 8
+
+    key = f"{nelements:04d}_{qbx_order:02d}_{proxy_radius_factor:.2f}".replace(".", "_")
 
     # }}}
 
@@ -89,10 +91,9 @@ def main(ctx_factory, visualize: bool = True) -> None:
     logger.info("nelements:     %d", density_discr.mesh.nelements)
     logger.info("ndofs:         %d", density_discr.ndofs)
 
-    from pytential import sym
     source_dd = places.auto_source.to_stage1()
     target_dd = places.auto_target.to_stage1()
-    proxy_dd = sym.as_dofdesc("proxy").to_stage1()
+    proxy_dd = source_dd.copy(geometry="proxy")
 
     # }}}
 
@@ -117,7 +118,7 @@ def main(ctx_factory, visualize: bool = True) -> None:
 
     # }}}
 
-    # {{{ plot geometries
+    # {{{ determine radii
 
     from arraycontext import thaw, to_numpy
     from meshmode.dof_array import flatten
@@ -144,6 +145,17 @@ def main(ctx_factory, visualize: bool = True) -> None:
 
     def make_proxy_points(nproxies):
         return proxy_radius * ds.make_circle(nproxies) + target_center.reshape(2, -1)
+
+    def make_source_proxies(nproxies):
+        return ds.as_source(actx, make_proxy_points(nproxies), qbx_order=qbx_order)
+
+    def make_proxy_indices(proxies):
+        ip = make_block_index_from_array([np.arange(proxies.ndofs)])
+        return MatrixBlockIndexRanges(target_indices, ip)
+
+    # }}}
+
+    # {{{ plot geometries
 
     if visualize:
         proxies = make_proxy_points(16)
@@ -173,7 +185,7 @@ def main(ctx_factory, visualize: bool = True) -> None:
         ax.set_aspect("equal")
         ax.margins(0.05, 0.05)
 
-        fig.savefig(f"qbx_multipole_error_{nelements:04d}_geometry")
+        fig.savefig(f"qbx_multipole_error_{key}_geometry")
         mp.close(fig)
 
     # }}}
@@ -199,13 +211,9 @@ def main(ctx_factory, visualize: bool = True) -> None:
             max_target_radius, min_source_radius, proxy_radius,
             ntargets, nsources) + 16
 
-    proxies = ds.as_source(
-            actx, make_proxy_points(estimate_nproxies),
-            qbx_order=qbx_order)
+    proxies = make_source_proxies(estimate_nproxies)
+    proxy_indices = make_proxy_indices(proxies)
     places = places.merge({proxy_dd.geometry: proxies})
-
-    proxy_indices = make_block_index_from_array([np.arange(proxies.ndofs)])
-    proxy_indices = MatrixBlockIndexRanges(target_indices, proxy_indices)
 
     id_eps_array = 10.0**(-np.arange(2, 16))
     rec_errors = np.empty((id_eps_array.size,))
@@ -231,7 +239,7 @@ def main(ctx_factory, visualize: bool = True) -> None:
         ax.set_xlabel(r"$\epsilon_{id}$")
         ax.set_ylabel(r"$Relative Error$")
 
-        fig.savefig(f"qbx_multipole_error_{nelements:04d}_model_vs_id_eps")
+        fig.savefig(f"qbx_multipole_error_{key}_model_vs_id_eps")
         mp.close(fig)
 
     # }}}
@@ -243,15 +251,13 @@ def main(ctx_factory, visualize: bool = True) -> None:
     id_rank = np.empty(id_eps_array.size, dtype=np.int64)
 
     for i, id_eps in enumerate(id_eps_array):
+        # {{{ increase nproxies until the id_eps tolerance is reached
+
         nproxies = 8
         while nproxies < 2 * max(ntargets, nsources):
-            proxies = ds.as_source(
-                    actx, make_proxy_points(nproxies),
-                    qbx_order=qbx_order)
+            proxies = make_source_proxies(nproxies)
+            proxy_indices = make_proxy_indices(proxies)
             places = places.merge({proxy_dd.geometry: proxies})
-
-            proxy_indices = make_block_index_from_array([np.arange(proxies.ndofs)])
-            proxy_indices = MatrixBlockIndexRanges(target_indices, proxy_indices)
 
             rec_error, rank = compute_target_reconstruction_error(
                     actx, interaction_mat, kernel, places, proxy_indices,
@@ -261,7 +267,9 @@ def main(ctx_factory, visualize: bool = True) -> None:
             if rec_error < 5 * id_eps:
                 break
 
-            nproxies += 2
+            nproxies += 1
+
+        # }}}
 
         nproxy_estimate[i] = nproxies
         nproxy_model[i] = ds.estimate_proxies_from_id_eps(ambient_dim, id_eps,
@@ -283,7 +291,7 @@ def main(ctx_factory, visualize: bool = True) -> None:
         ax.set_ylabel(r"$\#~proxy$")
         ax.legend()
 
-        fig.savefig(f"qbx_multipole_error_{nelements:04d}_model_vs_estimate")
+        fig.savefig(f"qbx_multipole_error_{key}_model_vs_estimate")
         mp.close(fig)
 
     # }}}

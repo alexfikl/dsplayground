@@ -70,7 +70,6 @@ def evaluate_qbx(
         actx: ArrayContext, kernel: Kernel, places: GeometryCollection,
         auto_where: Optional[Any] = None,
         index_set: Optional[MatrixBlockIndexRanges] = None,
-        qbx_forced_limit: Optional[Any] = None,
         context: Optional[Dict[str, Any]] = None) -> np.ndarray:
     if context is None:
         context = {}
@@ -84,7 +83,7 @@ def evaluate_qbx(
     source, target = _prepare_auto_where(auto_where, places)
     sym_op = sym.int_g_vec(kernel, sym_sigma,
             source=source, target=target,
-            qbx_forced_limit=+1)
+            qbx_forced_limit=-1)
 
     # }}}
 
