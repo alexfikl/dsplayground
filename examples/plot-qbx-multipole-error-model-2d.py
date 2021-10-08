@@ -26,6 +26,14 @@ class InteractionInfo:
     index_set: MatrixBlockIndexRanges
     evaluate: Any
 
+    @property
+    def ntargets(self):
+        return self.index_set.row.block_size(0)
+
+    @property
+    def nsources(self):
+        return self.index_set.col.block_size(0)
+
     def interaction_mat(self, places):
         @memoize_in(self, (InteractionInfo, "interaction_mat"))
         def mat():
@@ -84,17 +92,20 @@ def compute_target_reconstruction_error(
     # {{{ evaluate proxy matrices
 
     if proxy_center is not None and proxy_radius is not None:
+        proxy_mat = proxy.interaction_mat(places)
+        assert proxy_mat.shape == proxy.index_set.block_shape(0, 0)
+
         neighbors = find_source_in_proxy_ball(
                 actx, places, direct, proxy,
                 proxy_center=proxy_center, proxy_radius=proxy_radius,
                 )
-        neighbors_mat = neighbors.interaction_mat(places)
-        assert neighbors_mat.shape == neighbors.index_set.block_shape(0, 0)
+        logger.info("found %d neighbors", neighbors.nsources)
 
-        proxy_mat = proxy.interaction_mat(places)
-        assert proxy_mat.shape == proxy.index_set.block_shape(0, 0)
+        if neighbors.nsources > 0:
+            neighbors_mat = neighbors.interaction_mat(places)
+            assert neighbors_mat.shape == neighbors.index_set.block_shape(0, 0)
 
-        proxy_mat = np.hstack([neighbors_mat, proxy_mat])
+            proxy_mat = np.hstack([neighbors_mat, proxy_mat])
     else:
         proxy_mat = proxy.interaction_mat(places)
 
@@ -148,7 +159,7 @@ def main(ctx_factory,
 
     nelements = 64
     target_order = 16
-    qbx_order = 6
+    qbx_order = 4
 
     proxy_radius_factor = 1.25
     nblocks = 8
@@ -354,20 +365,22 @@ def main(ctx_factory,
     target_expansion_radii = target_indices.block_take(expansion_radii, 0)
     qbx_radius = np.min(target_expansion_radii)
 
-    estimate_min_id_eps = ds.estimate_qbx_vs_p2p_error(
-            qbx_order, qbx_radius, proxy_radius,
-            nsources=ntargets, ntargets=nsources)
-    logger.info("estimate_min_id_eps: %.5e", estimate_min_id_eps)
+    if use_p2p_proxy:
+        estimate_min_id_eps = ds.estimate_qbx_vs_p2p_error(
+                qbx_order, qbx_radius, proxy_radius,
+                nsources=ntargets, ntargets=nsources)
+        logger.info("estimate_min_id_eps: %.5e", estimate_min_id_eps)
 
     if visualize:
-        estimate_min_id_eps = max(estimate_min_id_eps, id_eps_array[-1])
-
         fig = mp.figure()
         ax = fig.gca()
 
         ax.loglog(id_eps_array, rec_errors, "o-")
         ax.loglog(id_eps_array, id_eps_array, "k--")
-        ax.axhline(estimate_min_id_eps, color="k")
+        if use_p2p_proxy:
+            estimate_min_id_eps = max(estimate_min_id_eps, id_eps_array[-1])
+            ax.axhline(estimate_min_id_eps, color="k")
+
         ax.set_xlabel(r"$\epsilon_{id}$")
         ax.set_ylabel(r"$Relative Error$")
 
