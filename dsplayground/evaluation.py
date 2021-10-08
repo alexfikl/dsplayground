@@ -16,6 +16,7 @@ from pytential.linalg.utils import MatrixBlockIndexRanges
 def evaluate_p2p(
         actx: ArrayContext, kernel: Kernel, places: GeometryCollection,
         auto_where: Optional[Any] = None,
+        index_set: Optional[MatrixBlockIndexRanges] = None,
         context: Optional[Dict[str, Any]] = None) -> np.ndarray:
     if context is None:
         context = {}
@@ -38,13 +39,25 @@ def evaluate_p2p(
     source = auto_where[0]
     source_discr = places.get_discretization(source.geometry, source.discr_stage)
 
-    from pytential.symbolic.matrix import P2PMatrixBuilder
-    mat = P2PMatrixBuilder(actx,
-            dep_expr=sym_sigma, other_dep_exprs=[],
-            dep_source=source_discr, dep_discr=source_discr,
-            places=places, context=context,
-            exclude_self=False, _weighted=False,
-            )(sym_op)
+    if index_set is not None:
+        assert index_set.nblocks == 1
+        from pytential.symbolic.matrix import FarFieldBlockBuilder
+        mat = FarFieldBlockBuilder(actx,
+                dep_expr=sym_sigma, other_dep_exprs=[],
+                dep_source=source_discr, dep_discr=source_discr,
+                places=places, index_set=index_set, context=context,
+                exclude_self=False, _weighted=False,
+                )(sym_op)
+
+        mat = mat.reshape(index_set.block_shape(0, 0))
+    else:
+        from pytential.symbolic.matrix import P2PMatrixBuilder
+        mat = P2PMatrixBuilder(actx,
+                dep_expr=sym_sigma, other_dep_exprs=[],
+                dep_source=source_discr, dep_discr=source_discr,
+                places=places, context=context,
+                exclude_self=False, _weighted=False,
+                )(sym_op)
 
     # }}}
 
@@ -92,7 +105,18 @@ def evaluate_qbx(
     dep_source = places.get_geometry(source.geometry)
     dep_discr = places.get_discretization(source.geometry, source.discr_stage)
 
-    if index_set is None:
+    if index_set is not None:
+        assert index_set.nblocks == 1
+        from pytential.symbolic.matrix import NearFieldBlockBuilder
+        mat = NearFieldBlockBuilder(actx,
+                dep_expr=sym_sigma, other_dep_exprs=[],
+                dep_source=dep_source, dep_discr=dep_discr,
+                places=places, index_set=index_set, context=context,
+                _weighted=False
+                )(sym_op)
+
+        mat = mat.reshape(index_set.block_shape(0, 0))
+    else:
         from pytential.symbolic.matrix import MatrixBuilder
         mat = MatrixBuilder(actx,
                 dep_expr=sym_sigma, other_dep_exprs=[],
@@ -100,16 +124,6 @@ def evaluate_qbx(
                 places=places, context=context,
                 _weighted=False
                 )(sym_op)
-    else:
-        assert index_set.nblocks == 1
-        from pytential.symbolic.matrix import NearFieldBlockBuilder
-        mat = NearFieldBlockBuilder(actx,
-                dep_expr=sym_sigma, other_dep_exprs=[],
-                dep_source=dep_source, dep_discr=dep_discr,
-                places=places, index_set=index_set, context=context,
-                _weighted=False)(sym_op)
-
-        mat = mat.reshape(index_set.block_shape(0, 0))
 
     # }}}
 
