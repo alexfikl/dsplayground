@@ -1,3 +1,8 @@
+"""
+- Run target skeletonization on the interaction between two point clouds.
+- Compare empirical and analytic estimates for the proxy count.
+"""
+
 from functools import partial
 
 import numpy as np
@@ -49,24 +54,24 @@ def main(ctx_factory, visualize: bool = True) -> None:
     # {{{ parameters
 
     ambient_dim = 2
-    nsources = 512
-    ntargets = 512
+    nsources = 128
+    ntargets = 256
 
     proxy_radius_factor = 1.5
 
-    max_source_radius = 1.0
-    min_target_radius = 2.5
+    max_target_radius = 1.0
+    min_source_radius = 1.75
 
-    proxy_radius = proxy_radius_factor * max_source_radius
+    proxy_radius = proxy_radius_factor * max_target_radius
 
     # }}}
 
     # {{{ set up geometry
 
-    sources = ds.make_random_points_in_sphere(ambient_dim, nsources,
-            rmin=0.0, rmax=max_source_radius)
     targets = ds.make_random_points_in_sphere(ambient_dim, ntargets,
-            rmin=min_target_radius, rmax=min_target_radius + 0.5)
+            rmin=0.0, rmax=max_target_radius)
+    sources = ds.make_random_points_in_sphere(ambient_dim, nsources,
+            rmin=min_source_radius, rmax=min_source_radius + 0.5)
 
     source_radius, source_center = ds.get_point_radius_and_center(sources)
     logger.info("sources: radius %.5e center %s", source_radius, source_center)
@@ -75,7 +80,10 @@ def main(ctx_factory, visualize: bool = True) -> None:
     logger.info("targets: radius %.5e center %s", target_radius, target_center)
 
     def make_proxy_points(nproxies):
-        if abs(proxy_radius - min_target_radius) < 0.1:
+        if abs(proxy_radius - min_source_radius) < 0.1:
+            # NOTE: if the sources are really close to the proxies / targets,
+            # the skeletonization does a pretty bad job. to counter that, we
+            # insert another ring of proxy points inside the first one
             return np.hstack([
                 proxy_radius * ds.make_circle(nproxies),
                 0.85 * proxy_radius * ds.make_circle(nproxies),
@@ -89,20 +97,23 @@ def main(ctx_factory, visualize: bool = True) -> None:
         fig = mp.figure()
         ax = fig.gca()
 
-        scircle = patch.Circle((0.0, 0.0), max_source_radius,
+        # target disk
+        tcircle = patch.Circle((0.0, 0.0), max_target_radius,
                 edgecolor="none", facecolor="k", alpha=0.25)
-        ax.add_patch(scircle)
-        tcircle = patch.Wedge((0.0, 0.0),
-                min_target_radius + 0.5, 0.0, 360.0, width=0.5,
-                edgecolor="none", facecolor="k", alpha=0.15)
         ax.add_patch(tcircle)
+        # source disk
+        scircle = patch.Wedge((0.0, 0.0),
+                min_source_radius + 0.5, 0.0, 360.0, width=0.5,
+                edgecolor="none", facecolor="k", alpha=0.15)
+        ax.add_patch(scircle)
+        # proxy circle
         pcircle = patch.Circle((0.0, 0.0), proxy_radius,
                 edgecolor="k", facecolor="none", lw=3)
         ax.add_patch(pcircle)
 
-        ax.plot(sources[0], sources[1], "o")
-        ax.plot(targets[0], targets[1], "o")
-        ax.plot(proxies[0], proxies[1], "ko")
+        ax.plot(sources[0], sources[1], "o", label="$Sources$")
+        ax.plot(targets[0], targets[1], "o", label="$Targets$")
+        ax.plot(proxies[0], proxies[1], "ko", label="$Proxies$")
         ax.plot(source_center[0], source_center[1], "x")
         ax.plot(target_center[0], target_center[1], "x")
 
@@ -110,8 +121,15 @@ def main(ctx_factory, visualize: bool = True) -> None:
         ax.set_ylabel("$y$")
         ax.set_aspect("equal")
         ax.margins(0.05, 0.05)
+        legend = ax.legend(
+                bbox_to_anchor=(0, 1.02, 1.0, 0.2),
+                loc="lower left", mode="expand",
+                borderaxespad=0, ncol=3)
 
-        fig.savefig("p2p_multipole_error_model_geometry")
+        fig.savefig("p2p_multipole_error_model_geometry",
+                bbox_extra_artists=(legend,),
+                bbox_inches="tight",
+                )
         mp.close(fig)
 
     sources = ds.as_source(actx, sources)
@@ -132,8 +150,8 @@ def main(ctx_factory, visualize: bool = True) -> None:
     # {{{ plot error vs id_eps
 
     estimate_nproxies = ds.estimate_proxies_from_id_eps(ambient_dim, 1.0e-16,
-            source_radius, target_radius, proxy_radius,
-            nsources, ntargets) + 16
+            target_radius, source_radius, proxy_radius,
+            ntargets, nsources) + 16
 
     proxies = ds.as_source(actx, make_proxy_points(estimate_nproxies))
 
@@ -142,8 +160,8 @@ def main(ctx_factory, visualize: bool = True) -> None:
 
     for i, id_eps in enumerate(id_eps_array):
         estimate_nproxies = ds.estimate_proxies_from_id_eps(ambient_dim, id_eps,
-                source_radius, target_radius, proxy_radius,
-                nsources, ntargets)
+                target_radius, source_radius, proxy_radius,
+                ntargets, nsources)
 
         rec_errors[i], _ = compute_target_reconstruction_error(
                 actx, interaction_mat, kernel,
@@ -189,8 +207,8 @@ def main(ctx_factory, visualize: bool = True) -> None:
 
         nproxy_estimate[i] = nproxies
         nproxy_model[i] = ds.estimate_proxies_from_id_eps(ambient_dim, id_eps,
-                source_radius, target_radius, proxy_radius,
-                nsources, ntargets)
+                target_radius, source_radius, proxy_radius,
+                ntargets, nsources)
         id_rank[i] = rank
 
         logger.info("id_eps %.5e nproxy estimate %3d model %3d rank %3d / %3d",
@@ -200,7 +218,7 @@ def main(ctx_factory, visualize: bool = True) -> None:
         fig = mp.figure()
         ax = fig.gca()
 
-        ax.semilogx(id_eps_array, nproxy_estimate, "o-", label="$Estimate$")
+        ax.semilogx(id_eps_array, nproxy_estimate, "o-", label="$Empirical$")
         # ax.semilogx(id_eps_array, id_rank, "o-", label="$Rank$")
         ax.semilogx(id_eps_array, nproxy_model, "ko-", label="$Model$")
         ax.set_xlabel(r"$\epsilon$")
