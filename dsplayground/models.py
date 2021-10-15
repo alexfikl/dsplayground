@@ -22,19 +22,20 @@ def estimate_proxies_from_id_eps(
     if ambient_dim == 2:
         eps = id_eps \
                 * (1.0 - rho) / (1.0 - alpha) \
-                * 2.0 * np.pi / rho \
-                * 2.0 / (2 + ntargets) / np.sqrt(ntargets)
+                * 2.0 / (2 + nsources) / np.sqrt(nsources)
 
         # NOTE: eps and rho are both < 1, so this should always be a positive number
-        p = int(np.log(eps) / np.log(rho)) - qbx_order
-        nproxy = min(2 * p, ntargets)
+        p = int(np.log(eps) / np.log(rho) - 1) - qbx_order
+        assert p > 0
+
+        nproxy = min(2 * p, nsources)
     elif ambient_dim == 3:
         eps = id_eps \
                 * (1 - rho) / (1 - alpha) \
-                * 12 * np.pi / (2 + ntargets) / ntargets
+                * 24 * np.pi / (2 + nsources) / np.sqrt(nsources)
 
-        p = int(np.log(eps) / np.log(rho))
-        nproxy = min(p * (p + 1) // 2, ntargets)
+        p = int(np.log(eps) / np.log(rho) - 1)
+        nproxy = min(p * (p + 1) // 2, nsources)
     else:
         raise ValueError(f"unsupported dimension: {ambient_dim}")
 
