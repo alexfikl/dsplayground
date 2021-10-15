@@ -43,11 +43,22 @@ def estimate_proxies_from_id_eps(
 
 
 def estimate_qbx_vs_p2p_error(
-        qbx_order: int, qbx_radius: float, proxy_radius: float,
+        qbx_order: int, qbx_radius: float, source_radius: float, proxy_radius: float,
         nsources: int, ntargets: int,
         ):
     if qbx_radius > proxy_radius:
         raise ValueError("'qbx_radius' should be smaller than 'proxy_radius'")
 
-    rho = qbx_radius / (proxy_radius - qbx_radius)
-    return rho**(1.5 * qbx_order) / (1 - rho)
+    if proxy_radius < source_radius:
+        raise ValueError("'source_radius' should be smaller than `proxy_radius`")
+
+    rho = qbx_radius / (proxy_radius - source_radius)
+
+    if rho > 1:
+        raise ValueError("cannot use local expansion estimate")
+
+    ee = rho**(2.0 * qbx_order) / (1 - rho)
+    # ee = 2.0 * np.pi * np.sqrt(nsources * ntargets) * (nsources + 2) \
+    #         * rho**(2.0 * qbx_order) / (1 - rho) / (1 - alpha)
+
+    return ee

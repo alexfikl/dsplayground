@@ -357,17 +357,17 @@ def main(ctx_factory,
         logger.info("id_eps %.5e estimate nproxy %d rec error %.5e",
                 id_eps, estimate_nproxies, rec_errors[i])
 
-    from meshmode.dof_array import flatten_to_numpy
-    expansion_radii = bind(places,
-            sym.expansion_radii(places.ambient_dim),
-            auto_where=source_dd)(actx)
-    expansion_radii = flatten_to_numpy(actx, expansion_radii)
-    target_expansion_radii = target_indices.block_take(expansion_radii, 0)
-    qbx_radius = np.min(target_expansion_radii)
-
     if use_p2p_proxy:
+        from meshmode.dof_array import flatten_to_numpy
+        expansion_radii = bind(places,
+                sym.expansion_radii(places.ambient_dim),
+                auto_where=source_dd)(actx)
+        expansion_radii = flatten_to_numpy(actx, expansion_radii)
+        target_expansion_radii = target_indices.block_take(expansion_radii, 0)
+        qbx_radius = np.min(target_expansion_radii)
+
         estimate_min_id_eps = ds.estimate_qbx_vs_p2p_error(
-                qbx_order, qbx_radius, proxy_radius,
+                qbx_order, qbx_radius, target_radius, proxy_radius,
                 nsources=ntargets, ntargets=nsources)
         logger.info("estimate_min_id_eps: %.5e", estimate_min_id_eps)
 
