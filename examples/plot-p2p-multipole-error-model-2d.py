@@ -17,6 +17,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# {{{{ run
+
 def compute_target_reconstruction_error(
         actx, interaction_mat, kernel,
         sources, targets, proxies, *,
@@ -44,7 +46,7 @@ def compute_target_reconstruction_error(
     return rec_error, P.shape[1]
 
 
-def main(ctx_factory, visualize: bool = True) -> None:
+def run_error_model(ctx_factory, visualize: bool = True) -> None:
     import dsplayground as ds
     actx = ds.get_cl_array_context(ctx_factory)
 
@@ -79,6 +81,9 @@ def main(ctx_factory, visualize: bool = True) -> None:
     target_radius, target_center = ds.get_point_radius_and_center(targets)
     logger.info("targets: radius %.5e center %s", target_radius, target_center)
 
+    sources = ds.as_source(actx, sources)
+    targets = ds.as_target(actx, targets)
+
     def make_proxy_points(nproxies):
         if abs(proxy_radius - min_source_radius) < 0.1:
             # NOTE: if the sources are really close to the proxies / targets,
@@ -90,50 +95,6 @@ def main(ctx_factory, visualize: bool = True) -> None:
                 ])
         else:
             return proxy_radius * ds.make_circle(nproxies)
-
-    if visualize:
-        proxies = make_proxy_points(16)
-
-        fig = mp.figure()
-        ax = fig.gca()
-
-        # target disk
-        tcircle = patch.Circle((0.0, 0.0), max_target_radius,
-                edgecolor="none", facecolor="k", alpha=0.25)
-        ax.add_patch(tcircle)
-        # source disk
-        scircle = patch.Wedge((0.0, 0.0),
-                min_source_radius + 0.5, 0.0, 360.0, width=0.5,
-                edgecolor="none", facecolor="k", alpha=0.15)
-        ax.add_patch(scircle)
-        # proxy circle
-        pcircle = patch.Circle((0.0, 0.0), proxy_radius,
-                edgecolor="k", facecolor="none", lw=3)
-        ax.add_patch(pcircle)
-
-        ax.plot(sources[0], sources[1], "o", label="$Sources$")
-        ax.plot(targets[0], targets[1], "o", label="$Targets$")
-        ax.plot(proxies[0], proxies[1], "ko", label="$Proxies$")
-        ax.plot(source_center[0], source_center[1], "x")
-        ax.plot(target_center[0], target_center[1], "x")
-
-        ax.set_xlabel("$x$")
-        ax.set_ylabel("$y$")
-        ax.set_aspect("equal")
-        ax.margins(0.05, 0.05)
-        legend = ax.legend(
-                bbox_to_anchor=(0, 1.02, 1.0, 0.2),
-                loc="lower left", mode="expand",
-                borderaxespad=0, ncol=3)
-
-        fig.savefig("p2p_multipole_error_model_geometry",
-                bbox_extra_artists=(legend,),
-                bbox_inches="tight",
-                )
-        mp.close(fig)
-
-    sources = ds.as_source(actx, sources)
-    targets = ds.as_target(actx, targets)
 
     # }}}
 
@@ -149,11 +110,11 @@ def main(ctx_factory, visualize: bool = True) -> None:
 
     # {{{ plot error vs id_eps
 
-    estimate_nproxies = ds.estimate_proxies_from_id_eps(ambient_dim, 1.0e-16,
+    estimate_rec_nproxy = ds.estimate_proxies_from_id_eps(ambient_dim, 1.0e-16,
             target_radius, source_radius, proxy_radius,
             ntargets, nsources) + 16
 
-    proxies = ds.as_source(actx, make_proxy_points(estimate_nproxies))
+    proxies = ds.as_source(actx, make_proxy_points(estimate_rec_nproxy))
 
     id_eps_array = 10.0**(-np.arange(2, 16))
     rec_errors = np.empty((id_eps_array.size,))
@@ -170,23 +131,11 @@ def main(ctx_factory, visualize: bool = True) -> None:
         logger.info("id_eps %.5e estimate nproxy %d rec error %.5e",
                 id_eps, estimate_nproxies, rec_errors[i])
 
-    if visualize:
-        fig = mp.figure()
-        ax = fig.gca()
-
-        ax.loglog(id_eps_array, rec_errors, "o-")
-        ax.loglog(id_eps_array, id_eps_array, "k--")
-        ax.set_xlabel(r"$\epsilon_{id}$")
-        ax.set_ylabel(r"$Relative Error$")
-
-        fig.savefig("p2p_multipole_error_model_vs_id_eps")
-        mp.close(fig)
-
     # }}}
 
     # {{{ plot proxy count model vs estimate
 
-    nproxy_estimate = np.empty(id_eps_array.size, dtype=np.int64)
+    nproxy_empirical = np.empty(id_eps_array.size, dtype=np.int64)
     nproxy_model = np.empty(id_eps_array.size, dtype=np.int64)
     id_rank = np.empty(id_eps_array.size, dtype=np.int64)
 
@@ -210,30 +159,157 @@ def main(ctx_factory, visualize: bool = True) -> None:
 
         # }}}
 
-        nproxy_estimate[i] = nproxies
+        nproxy_empirical[i] = nproxies
         nproxy_model[i] = ds.estimate_proxies_from_id_eps(ambient_dim, id_eps,
                 target_radius, source_radius, proxy_radius,
                 ntargets, nsources)
         id_rank[i] = rank
 
-        logger.info("id_eps %.5e nproxy estimate %3d model %3d rank %3d / %3d",
-                id_eps, nproxy_estimate[i], nproxy_model[i], rank, ntargets)
+        logger.info("id_eps %.5e nproxy empirical %3d model %3d rank %3d / %3d",
+                id_eps, nproxy_empirical[i], nproxy_model[i], rank, ntargets)
 
     if visualize:
         fig = mp.figure()
-        ax = fig.gca()
-
-        ax.semilogx(id_eps_array, nproxy_estimate, "o-", label="$Empirical$")
-        # ax.semilogx(id_eps_array, id_rank, "o-", label="$Rank$")
-        ax.semilogx(id_eps_array, nproxy_model, "ko-", label="$Model$")
-        ax.set_xlabel(r"$\epsilon$")
-        ax.set_ylabel(r"$\#~proxy$")
-        ax.legend()
-
-        fig.savefig("p2p_multipole_error_model_vs_estimate")
         mp.close(fig)
 
     # }}}
+
+    # {{{ write and visualize
+
+    filename = "p2p_model_{}d_{}.npz".format(ambient_dim, "_".join([
+        str(v) for v in (
+            "nsources", nsources,
+            "ntargets", ntargets,
+            "factor", proxy_radius_factor)
+        ]).replace(".", "_"))
+
+    np.savez_compressed(filename,
+            # parameters
+            ambient_dim=ambient_dim,
+            nsources=nsources,
+            ntargets=ntargets,
+            proxy_radius_factor=proxy_radius_factor,
+            max_target_radius=max_target_radius,
+            min_source_radius=min_source_radius,
+            # geometry
+            sources=actx.to_numpy(sources.nodes()),
+            targets=actx.to_numpy(targets.nodes()),
+            proxies=make_proxy_points(16),
+            # convergence
+            id_eps=id_eps_array,
+            rec_errors=rec_errors,
+            rec_nproxy=estimate_rec_nproxy,
+            # model
+            nproxy_empirical=nproxy_empirical,
+            nproxy_model=nproxy_model,
+            id_rank=id_rank,
+            )
+
+    if visualize:
+        plot_error_model(filename)
+
+    # }}}
+
+# }}}
+
+
+# {{{ plot
+
+def plot_error_model(datafile: str) -> None:
+    import pathlib
+    datafile = pathlib.Path(datafile)
+    basename = datafile.with_suffix("")
+
+    r = np.load(datafile)
+    fig = mp.figure()
+
+    # {{{ geometry
+
+    sources = r["sources"]
+    targets = r["targets"]
+    proxies = r["proxies"]
+
+    max_target_radius = r["max_target_radius"]
+    min_source_radius = r["min_source_radius"]
+
+    proxy_radius = np.mean(la.norm(proxies, axis=0))
+
+    ax = fig.gca()
+
+    # target disk
+    tcircle = patch.Circle((0.0, 0.0), max_target_radius,
+            edgecolor="none", facecolor="k", alpha=0.25)
+    ax.add_patch(tcircle)
+    # source disk
+    scircle = patch.Wedge((0.0, 0.0),
+            min_source_radius + 0.5, 0.0, 360.0, width=0.5,
+            edgecolor="none", facecolor="k", alpha=0.15)
+    ax.add_patch(scircle)
+    # proxy circle
+    pcircle = patch.Circle((0.0, 0.0), proxy_radius,
+            edgecolor="k", facecolor="none", lw=3)
+    ax.add_patch(pcircle)
+
+    ax.plot(sources[0], sources[1], "o", label="$Sources$")
+    ax.plot(targets[0], targets[1], "o", label="$Targets$")
+    ax.plot(proxies[0], proxies[1], "ko", label="$Proxies$")
+
+    ax.set_xlabel("$x$")
+    ax.set_ylabel("$y$")
+    ax.set_aspect("equal")
+    ax.margins(0.05, 0.05)
+    legend = ax.legend(
+            bbox_to_anchor=(0, 1.02, 1.0, 0.2),
+            loc="lower left", mode="expand",
+            borderaxespad=0, ncol=3)
+
+    fig.savefig(f"{basename}_geometry",
+            bbox_extra_artists=(legend,),
+            bbox_inches="tight",
+            )
+    fig.clf()
+
+    # }}}
+
+    # {{{ convergene errors
+
+    id_eps = r["id_eps"]
+    rec_errors = r["rec_errors"]
+
+    ax = fig.gca()
+
+    ax.loglog(id_eps, rec_errors, "o-")
+    ax.loglog(id_eps, id_eps, "k--")
+    ax.set_xlabel(r"$\epsilon_{id}$")
+    ax.set_ylabel(r"$Relative Error$")
+
+    fig.savefig(f"{basename}_id_eps")
+    fig.clf()
+
+    # }}}
+
+    # {{{ model vs empirical
+
+    nproxy_empirical = r["nproxy_empirical"]
+    nproxy_model = r["nproxy_model"]
+
+    ax = fig.gca()
+
+    ax.semilogx(id_eps, nproxy_empirical, "o-", label="$Empirical$")
+    # ax.semilogx(id_eps_array, id_rank, "o-", label="$Rank$")
+    ax.semilogx(id_eps, nproxy_model, "ko-", label="$Model$")
+    ax.set_xlabel(r"$\epsilon$")
+    ax.set_ylabel(r"$\#~proxy$")
+    ax.legend()
+
+    fig.savefig(f"{basename}_model_vs_empirical")
+    fig.clf()
+
+    # }}}
+
+    mp.close(fig)
+
+# }}}
 
 
 if __name__ == "__main__":
@@ -244,4 +320,4 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         exec(sys.argv[1])
     else:
-        main(cl._csc)
+        run_error_model(cl._csc)
