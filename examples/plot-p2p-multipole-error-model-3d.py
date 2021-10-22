@@ -174,7 +174,9 @@ def main(ctx_factory, visualize: bool = True) -> None:
 
     nproxies = 2
     for i, id_eps in enumerate(id_eps_array):
-        nproxies = max(nproxies - 8, 2)
+        # {{{ increase nproxies until the id_eps tolerance is reached
+
+        nproxies = max(nproxies - 2, 2)
         while nproxies < 2 * max(ntargets, nsources):
             proxies = ds.as_source(actx, make_proxy_points(nproxies))
 
@@ -187,6 +189,8 @@ def main(ctx_factory, visualize: bool = True) -> None:
                 break
 
             nproxies += 2
+
+        # }}}
 
         nproxy_estimate[i] = nproxies
         nproxy_model[i] = ds.estimate_proxies_from_id_eps(ambient_dim, id_eps,

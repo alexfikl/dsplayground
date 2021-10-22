@@ -397,10 +397,11 @@ def main(ctx_factory,
     nproxy_model = np.empty(id_eps_array.size, dtype=np.int64)
     id_rank = np.empty(id_eps_array.size, dtype=np.int64)
 
+    nproxies = 3
     for i, id_eps in enumerate(id_eps_array):
         # {{{ increase nproxies until the id_eps tolerance is reached
 
-        nproxies = 3
+        nproxies = max(nproxies - 2, 3)
         while nproxies < max(ntargets, nsources):
             proxies = make_source_proxies(nproxies)
             places = places.merge({proxy_dd.geometry: proxies})

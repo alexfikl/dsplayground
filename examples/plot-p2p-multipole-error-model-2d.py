@@ -190,8 +190,11 @@ def main(ctx_factory, visualize: bool = True) -> None:
     nproxy_model = np.empty(id_eps_array.size, dtype=np.int64)
     id_rank = np.empty(id_eps_array.size, dtype=np.int64)
 
+    nproxies = 3
     for i, id_eps in enumerate(id_eps_array):
-        nproxies = 8
+        # {{{ increase nproxies until the id_eps tolerance is reached
+
+        nproxies = max(nproxies - 2, 3)
         while nproxies < 2 * max(ntargets, nsources):
             proxies = ds.as_source(actx, make_proxy_points(nproxies))
 
@@ -204,6 +207,8 @@ def main(ctx_factory, visualize: bool = True) -> None:
                 break
 
             nproxies += 2
+
+        # }}}
 
         nproxy_estimate[i] = nproxies
         nproxy_model[i] = ds.estimate_proxies_from_id_eps(ambient_dim, id_eps,
