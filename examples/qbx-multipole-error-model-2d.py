@@ -44,17 +44,6 @@ class InteractionInfo:
         return mat()
 
 
-@memoize_on_first_arg
-def get_numpy_nodes(discr):
-    from arraycontext import thaw
-    from meshmode.dof_array import flatten_to_numpy
-    return np.stack(
-            flatten_to_numpy(
-                discr._setup_actx,
-                thaw(discr.nodes(), discr._setup_actx))
-            )
-
-
 def find_source_in_proxy_ball(
         actx, places,
         direct: InteractionInfo, proxy: InteractionInfo, *,
@@ -65,8 +54,9 @@ def find_source_in_proxy_ball(
 
     assert source_dd == direct.target_dd
 
+    import dsplayground as ds
     discr = places.get_discretization(source_dd.geometry, source_dd.discr_stage)
-    nodes = get_numpy_nodes(discr)
+    nodes = ds.get_numpy_nodes(discr)
 
     source_nodes = index_set.col.block_take(nodes.T, 0).T
     mask = la.norm(

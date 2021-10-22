@@ -3,7 +3,10 @@ from dsplayground.geometry import (
     make_random_points_in_box, make_random_points_in_sphere,
 
     as_source, as_target, affine_map,
+
     get_point_radius_and_center,
+    get_discr_nodes,
+    find_farthest_apart_block,
 )
 from dsplayground.evaluation import (
     evaluate_p2p, evaluate_qbx,
@@ -20,6 +23,8 @@ __all__ = (
 
     "as_source", "as_target", "affine_map",
     "get_point_radius_and_center",
+    "get_discr_nodes",
+    "find_farthest_apart_block",
 
     "get_cl_array_context",
 

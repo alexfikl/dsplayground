@@ -35,7 +35,7 @@ def estimate_proxies_from_id_eps(
                 * 24 * np.pi / (2 + nsources) / np.sqrt(nsources)
 
         p = int(np.log(eps) / np.log(rho) - 1)
-        nproxy = min(p * (p + 1) // 2, nsources)
+        nproxy = min(p * (p + 1), nsources)
     else:
         raise ValueError(f"unsupported dimension: {ambient_dim}")
 

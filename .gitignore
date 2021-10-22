@@ -51,3 +51,4 @@ dmypy.json
 *.eps
 *.gif
 *.npz
+*.vtu

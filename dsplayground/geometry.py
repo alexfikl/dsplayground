@@ -4,8 +4,12 @@ import numpy as np
 import numpy.linalg as la
 
 from arraycontext import ArrayContext
+from meshmode.discretization import Discretization
+from pytools import memoize_on_first_arg
+
 from pytential.source import PointPotentialSource
 from pytential.target import PointsTarget
+from pytential.linalg import BlockIndexRanges
 
 
 # pylint: disable-next=abstract-method
@@ -145,6 +149,21 @@ def affine_map(x: np.ndarray, *,
 # }}}
 
 
+# {{{ get_discr_nodes
+
+@memoize_on_first_arg
+def get_discr_nodes(discr: Discretization) -> np.ndarray:
+    from arraycontext import thaw
+    from meshmode.dof_array import flatten_to_numpy
+    return np.stack(
+            flatten_to_numpy(
+                discr._setup_actx,
+                thaw(discr.nodes(), discr._setup_actx))
+            )
+
+# }}}
+
+
 # {{{ get_point_radius_and_center
 
 def get_point_radius_and_center(points: np.ndarray) -> Tuple[float, np.ndarray]:
@@ -152,5 +171,36 @@ def get_point_radius_and_center(points: np.ndarray) -> Tuple[float, np.ndarray]:
     radius = np.max(la.norm(points - center.reshape(-1, 1), ord=2, axis=0))
 
     return radius, center
+
+# }}}
+
+
+# {{{ find_farthest_apart_block
+
+def find_farthest_apart_block(
+        actx: ArrayContext,
+        discr: Discretization,
+        indices: BlockIndexRanges,
+        itarget: int) -> int:
+    nodes = get_discr_nodes(discr)
+    target_nodes = indices.block_take(nodes.T, itarget).T
+    target_center = np.mean(target_nodes, axis=1)
+
+    max_index = itarget
+    max_dists = -np.inf
+
+    for jsource in range(indices.nblocks):
+        if itarget == jsource:
+            continue
+
+        source_nodes = indices.block_take(nodes.T, jsource).T
+        source_center = np.mean(source_nodes, axis=1)
+
+        dist = la.norm(target_center - source_center)
+        if dist > max_dists:
+            max_dists = dist
+            max_index = jsource
+
+    return max_index
 
 # }}}
