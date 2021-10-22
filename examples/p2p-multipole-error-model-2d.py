@@ -178,8 +178,8 @@ def run_error_model(ctx_factory, visualize: bool = True) -> None:
 
     filename = "p2p_model_{}d_{}.npz".format(ambient_dim, "_".join([
         str(v) for v in (
-            "nsources", nsources,
             "ntargets", ntargets,
+            "nsources", nsources,
             "factor", proxy_radius_factor)
         ]).replace(".", "_"))
 
