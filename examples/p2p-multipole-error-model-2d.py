@@ -128,7 +128,7 @@ def run_error_model(ctx_factory, visualize: bool = True) -> None:
                 actx, interaction_mat, kernel,
                 sources, targets, proxies,
                 id_eps=id_eps, verbose=False)
-        logger.info("id_eps %.5e estimate nproxy %d rec error %.5e",
+        logger.info("id_eps %.5e model nproxy %d rec error %.5e",
                 id_eps, estimate_nproxies, rec_errors[i])
 
     # }}}
@@ -167,10 +167,6 @@ def run_error_model(ctx_factory, visualize: bool = True) -> None:
 
         logger.info("id_eps %.5e nproxy empirical %3d model %3d rank %3d / %3d",
                 id_eps, nproxy_empirical[i], nproxy_model[i], rank, ntargets)
-
-    if visualize:
-        fig = mp.figure()
-        mp.close(fig)
 
     # }}}
 
@@ -271,7 +267,7 @@ def plot_error_model(datafile: str) -> None:
 
     # }}}
 
-    # {{{ convergene errors
+    # {{{ convergence errors
 
     id_eps = r["id_eps"]
     rec_errors = r["rec_errors"]
