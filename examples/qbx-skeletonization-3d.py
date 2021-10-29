@@ -54,7 +54,7 @@ def compute_target_reconstruction_error(
 
     # }}}
 
-    return rec_error, P.shape[1]
+    return rec_error, k
 
 # }}}
 
@@ -75,13 +75,13 @@ def run_qbx_skeletonization(ctx_factory,
 
     ambient_dim = 3
 
-    nelements = 24
-    target_order = 16
+    nelements = 16
+    target_order = 12
     source_ovsmp = 1
     qbx_order = 4
 
-    nblocks = 12
-    proxy_radius_factor = 1.5
+    nblocks = 24
+    proxy_radius_factor = 1.25
 
     basename = "qbx_skeletonization_{}d_{}".format(ambient_dim, "_".join([
         str(v) for v in (
@@ -125,7 +125,7 @@ def run_qbx_skeletonization(ctx_factory,
 
     if visualize:
         from meshmode.discretization.visualization import make_visualizer
-        vis = make_visualizer(actx, density_discr)
+        vis = make_visualizer(actx, density_discr, target_order)
         vis.write_vtk_file(f"{basename}_geometry.vtu", [], overwrite=True)
 
     # }}}
@@ -148,7 +148,9 @@ def run_qbx_skeletonization(ctx_factory,
     from pytential.linalg.proxy import partition_by_nodes
     max_particles_in_box = density_discr.ndofs // nblocks
     partition = partition_by_nodes(actx, density_discr,
-            max_particles_in_box=max_particles_in_box)
+            max_particles_in_box=max_particles_in_box,
+            tree_kind="adaptive-level-restricted")
+    logger.info("nblocks %5d got %5d", nblocks, partition.nblocks)
     nblocks = partition.nblocks
 
     if itarget is None:
@@ -166,6 +168,44 @@ def run_qbx_skeletonization(ctx_factory,
 
     from pytential.linalg.utils import MatrixBlockIndexRanges
     mat_indices = MatrixBlockIndexRanges(target_indices, source_indices)
+
+    # }}}
+
+    # {{{ visualize partition sizes
+
+    if visualize:
+        block_sizes = np.array([partition.block_size(i) for i in range(nblocks)])
+        logger.info("block sizes: %s", list(block_sizes))
+
+        fig = mp.figure()
+        ax = fig.gca()
+
+        ax.plot(block_sizes, "o-")
+        ax.plot(itarget, block_sizes[itarget], "o", label="$Target$")
+        ax.plot(jsource, block_sizes[jsource], "o", label="$Source$")
+        ax.axhline(int(np.mean(block_sizes)), ls="--", color="k")
+
+        ax.set_xlabel("$block$")
+        ax.set_ylabel(r"$\#points$")
+
+        fig.savefig(f"{basename}_block_sizes")
+        mp.close(fig)
+
+    # }}}
+
+    # {{{ plot indices and proxies
+
+    if visualize:
+        marker = np.zeros(density_discr.ndofs)
+        marker[source_indices.indices] = 1
+        marker[target_indices.indices] = -1
+
+        from arraycontext import thaw, unflatten
+        template_ary = thaw(density_discr.nodes()[0], actx)
+        marker = unflatten(template_ary, actx.from_numpy(marker), actx)
+        vis.write_vtk_file(f"{basename}_marker.vtu", [
+            ("marker", marker),
+            ], overwrite=True)
 
     # }}}
 
@@ -194,8 +234,26 @@ def run_qbx_skeletonization(ctx_factory,
             )
     # NOTE: only count the sources outside the proxy ball
     min_source_radius = max(proxy_radius, min_source_radius)
-    logger.info("min_target_radius %.5e min_source_radius %.5e",
+    logger.info("max_target_radius %.5e min_source_radius %.5e",
             max_target_radius, min_source_radius)
+
+    # }}}
+
+    # {{{ plot proxy ball
+
+    if visualize:
+        import meshmode.mesh.generation as mgen
+        sphere = mgen.generate_sphere(1.0, 4,
+                uniform_refinement_rounds=2,
+                )
+
+        from meshmode.mesh.processing import affine_map
+        sphere = affine_map(sphere, A=proxy_radius, b=target_center)
+        proxy_discr = density_discr.copy(mesh=sphere)
+
+        from meshmode.discretization.visualization import make_visualizer
+        vis = make_visualizer(actx, proxy_discr, target_order)
+        vis.write_vtk_file(f"{basename}_proxy_geometry.vtu", [], overwrite=True)
 
     # }}}
 
@@ -252,7 +310,7 @@ def run_qbx_skeletonization(ctx_factory,
 
     # {{{ error vs. id_eps
 
-    id_eps_array = 10.0**(-np.arange(2, 16))
+    id_eps_array = 10.0**(-np.arange(2, 15))
     rec_errors = np.empty((id_eps_array.size,))
 
     for i, id_eps in enumerate(id_eps_array):
@@ -264,6 +322,79 @@ def run_qbx_skeletonization(ctx_factory,
 
         logger.info("id_eps %.5e rec error %.5e",
                 id_eps, rec_errors[i])
+
+    # }}}
+
+    # {{{ error vs model
+
+    nproxy_empirical = np.empty(id_eps_array.size, dtype=np.int64)
+    nproxy_model = np.empty(id_eps_array.size, dtype=np.int64)
+    id_rank = np.empty(id_eps_array.size, dtype=np.int64)
+
+    nproxies = 3
+    nproxy_increment = 4
+    nproxy_model_factor = 1
+
+    for i, id_eps in enumerate(id_eps_array):
+        # {{{ increase nproxies until the id_eps tolerance is reached
+
+        test_nproxies = []
+        test_rec_errors = []
+
+        # start from the previous value, but cap at ntargets or nsources
+        nproxies = min(
+                max(nproxies - 2 * nproxy_increment, 3),
+                max(nsources, ntargets))
+
+        while nproxies < 2 * max(nsources, ntargets):
+            proxy = ProxyGenerator(places,
+                    approx_nproxy=nproxies,
+                    radius_factor=proxy_radius_factor)
+            pxy = proxy(actx, target_dd, target_indices)
+
+            proxy_indices = MatrixBlockIndexRanges(target_indices, pxy.indices)
+            places = places.merge({
+                proxy_dd.geometry: pxy.as_sources(actx, qbx_order)
+                })
+
+            rec_error, rank = compute_target_reconstruction_error(
+                    actx, wrangler, places, mat_indices, proxy_indices,
+                    source_dd=source_dd, target_dd=target_dd, proxy_dd=proxy_dd,
+                    id_eps=id_eps,
+                    verbose=False,
+                    )
+
+            if rec_error < 5 * id_eps:
+                break
+
+            test_nproxies.append(nproxies)
+            test_rec_errors.append(rec_error)
+
+            logger.info("nproxy %5d id_eps %.5e got %.12e",
+                    nproxies, id_eps, rec_error)
+
+            nproxies += nproxy_increment
+
+        if visualize and len(test_nproxies) > 3:
+            fig = mp.figure()
+            ax = fig.gca()
+
+            ax.semilogy(np.array(test_nproxies), np.array(test_rec_errors))
+            ax.set_xlabel(r"$\#proxies$")
+            ax.set_ylabel("$Error$")
+
+            fig.savefig(f"{basename}_model_error_{i:02d}")
+            mp.close(fig)
+
+        nproxy_empirical[i] = nproxies
+        nproxy_model[i] = nproxy_model_factor * ds.estimate_proxies_from_id_eps(
+                ambient_dim, id_eps,
+                max_target_radius, min_source_radius, proxy_radius,
+                ntargets, nsources)
+        id_rank[i] = rank
+
+        logger.info("id_eps %.5e nproxy empirical %3d model %3d rank %3d / %3d",
+                id_eps, nproxy_empirical[i], nproxy_model[i], rank, ntargets)
 
     # }}}
 
@@ -288,6 +419,10 @@ def run_qbx_skeletonization(ctx_factory,
             # convergence
             id_eps=id_eps_array,
             rec_errors=rec_errors,
+            # model
+            nproxy_empirical=nproxy_empirical,
+            nproxy_model=nproxy_model,
+            id_rank=id_rank,
             )
 
     if visualize:
@@ -300,7 +435,10 @@ def run_qbx_skeletonization(ctx_factory,
 
 # {{{ plot
 
+
 def plot_qbx_skeletonization(filename: str) -> None:
+    import dsplayground as ds           # noqa: F401
+
     import pathlib
     datafile = pathlib.Path(filename)
     basename = datafile.with_suffix("")
@@ -308,7 +446,7 @@ def plot_qbx_skeletonization(filename: str) -> None:
     r = np.load(datafile)
     fig = mp.figure()
 
-    # {{{ convergence
+    # {{{ convergence vs id_eps
 
     ax = fig.gca()
 
@@ -323,6 +461,26 @@ def plot_qbx_skeletonization(filename: str) -> None:
     ax.set_ylabel(r"$Relative~Error$")
 
     fig.savefig(f"{basename}_id_eps")
+    fig.clf()
+
+    # }}}
+
+    # {{{ convergence vs model
+
+    nproxy_empirical = r["nproxy_empirical"]
+    nproxy_model = r["nproxy_model"]
+
+    ax = fig.gca()
+
+    ax.semilogx(id_eps, nproxy_empirical, "o-", label="$Empirical$")
+    # ax.semilogx(id_eps_array, id_rank, "o-", label="$Rank$")
+    ax.semilogx(id_eps, nproxy_model, "ko-", label="$Model$")
+    ax.set_xlabel(r"$\epsilon$")
+    ax.set_ylabel(r"$\#~proxy$")
+    ax.legend()
+
+    fig.savefig(f"{basename}_model_vs_empirical")
+    fig.clf()
 
     # }}}
 
