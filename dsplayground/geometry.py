@@ -153,13 +153,12 @@ def affine_map(x: np.ndarray, *,
 
 @memoize_on_first_arg
 def get_discr_nodes(discr: Discretization) -> np.ndarray:
-    from arraycontext import thaw
-    from meshmode.dof_array import flatten_to_numpy
-    return np.stack(
-            flatten_to_numpy(
-                discr._setup_actx,
-                thaw(discr.nodes(), discr._setup_actx))
-            )
+    from arraycontext import thaw, flatten
+    actx = discr._setup_actx        # pylint: disable=protected-access
+
+    return actx.to_numpy(
+            flatten(thaw(discr.nodes(), actx), actx),
+            ).reshape(discr.ambient_dim, -1)
 
 # }}}
 
