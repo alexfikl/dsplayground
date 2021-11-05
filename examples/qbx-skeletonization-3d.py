@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Optional
 
 import numpy as np
@@ -73,22 +74,28 @@ def run_qbx_skeletonization(ctx_factory,
 
     # {{{ parameters
 
+    # This case seems to bottom out::
+    #   nelements = 24, target_order = 16, qbx_order = 4,
+    #   proxy_radius_factor = 1.5
+
     ambient_dim = 3
 
-    nelements = 16
-    target_order = 12
+    nelements = 24
+    target_order = 14
     source_ovsmp = 1
     qbx_order = 4
 
     nblocks = 24
-    proxy_radius_factor = 1.25
+    proxy_radius_factor = 1.5
 
     basename = "qbx_skeletonization_{}d_{}".format(ambient_dim, "_".join([
         str(v) for v in (
+            "nelements", nelements,
             "order", target_order,
             "qbx", qbx_order,
             "factor", proxy_radius_factor)
         ]).replace(".", "_"))
+    logger.info("basename: %s", basename)
 
     # }}}
 
@@ -153,12 +160,18 @@ def run_qbx_skeletonization(ctx_factory,
     logger.info("nblocks %5d got %5d", nblocks, partition.nblocks)
     nblocks = partition.nblocks
 
-    if itarget is None:
+    if itarget is None and jsource is None:
         itarget = 0
-
-    if jsource is None:
         jsource = ds.find_farthest_apart_block(
                 actx, density_discr, partition, itarget)
+    elif itarget is None and jsource is not None:
+        itarget = ds.find_farthest_apart_block(
+                actx, density_discr, partition, jsource)
+    elif itarget is not None and jsource is None:
+        jsource = ds.find_farthest_apart_block(
+                actx, density_discr, partition, itarget)
+    else:
+        pass
 
     from pytential.linalg.utils import make_block_index_from_array
     source_indices = make_block_index_from_array(
@@ -234,8 +247,9 @@ def run_qbx_skeletonization(ctx_factory,
             )
     # NOTE: only count the sources outside the proxy ball
     min_source_radius = max(proxy_radius, min_source_radius)
-    logger.info("max_target_radius %.5e min_source_radius %.5e",
-            max_target_radius, min_source_radius)
+    logger.info("max_target_radius %.5e min_source_radius %.5e rho %.5e",
+            max_target_radius, min_source_radius,
+            max_target_radius / min_source_radius)
 
     # }}}
 
@@ -266,7 +280,9 @@ def run_qbx_skeletonization(ctx_factory,
     from pytential.linalg import QBXProxyGenerator as ProxyGenerator
     proxy = ProxyGenerator(places,
             approx_nproxy=estimate_nproxy,
-            radius_factor=proxy_radius_factor)
+            radius_factor=proxy_radius_factor,
+            _generate_ref_proxies=partial(ds.make_sphere, method="fibonacci"),
+            )
     pxy = proxy(actx, target_dd, target_indices)
 
     proxy_indices = MatrixBlockIndexRanges(target_indices, pxy.indices)
@@ -310,7 +326,7 @@ def run_qbx_skeletonization(ctx_factory,
 
     # {{{ error vs. id_eps
 
-    id_eps_array = 10.0**(-np.arange(2, 15))
+    id_eps_array = 10.0**(-np.arange(2, 16))
     rec_errors = np.empty((id_eps_array.size,))
 
     for i, id_eps in enumerate(id_eps_array):
@@ -331,70 +347,79 @@ def run_qbx_skeletonization(ctx_factory,
     nproxy_model = np.empty(id_eps_array.size, dtype=np.int64)
     id_rank = np.empty(id_eps_array.size, dtype=np.int64)
 
-    nproxies = 3
-    nproxy_increment = 4
-    nproxy_model_factor = 1
+    # nproxies = 3
+    # nproxy_increment = 4
+    # nproxy_model_factor = 1
 
-    for i, id_eps in enumerate(id_eps_array):
-        # {{{ increase nproxies until the id_eps tolerance is reached
+    # for i, id_eps in enumerate(id_eps_array):
+    #     # {{{ increase nproxies until the id_eps tolerance is reached
 
-        test_nproxies = []
-        test_rec_errors = []
+    #     test_nproxies = []
+    #     test_rec_errors = []
 
-        # start from the previous value, but cap at ntargets or nsources
-        nproxies = min(
-                max(nproxies - 2 * nproxy_increment, 3),
-                max(nsources, ntargets))
+    #     # start from the previous value, but cap at ntargets or nsources
+    #     nproxies = min(
+    #             max(nproxies - 2 * nproxy_increment, 3),
+    #             max(nsources, ntargets))
 
-        while nproxies < 2 * max(nsources, ntargets):
-            proxy = ProxyGenerator(places,
-                    approx_nproxy=nproxies,
-                    radius_factor=proxy_radius_factor)
-            pxy = proxy(actx, target_dd, target_indices)
+    #     while nproxies < 2 * max(nsources, ntargets):
+    #         proxy = ProxyGenerator(places,
+    #                 approx_nproxy=nproxies,
+    #                 radius_factor=proxy_radius_factor,
+    #                 _generate_ref_proxies=partial(
+    #                 ds.make_sphere, method="fibonacci"),
+    #                 )
+    #         pxy = proxy(actx, target_dd, target_indices)
 
-            proxy_indices = MatrixBlockIndexRanges(target_indices, pxy.indices)
-            places = places.merge({
-                proxy_dd.geometry: pxy.as_sources(actx, qbx_order)
-                })
+    #         proxy_indices = MatrixBlockIndexRanges(target_indices, pxy.indices)
+    #         places = places.merge({
+    #             proxy_dd.geometry: pxy.as_sources(actx, qbx_order)
+    #             })
 
-            rec_error, rank = compute_target_reconstruction_error(
-                    actx, wrangler, places, mat_indices, proxy_indices,
-                    source_dd=source_dd, target_dd=target_dd, proxy_dd=proxy_dd,
-                    id_eps=id_eps,
-                    verbose=False,
-                    )
+    #         rec_error, rank = compute_target_reconstruction_error(
+    #                 actx, wrangler, places, mat_indices, proxy_indices,
+    #                 source_dd=source_dd, target_dd=target_dd, proxy_dd=proxy_dd,
+    #                 id_eps=id_eps,
+    #                 verbose=False,
+    #                 )
 
-            if rec_error < 5 * id_eps:
-                break
+    #         if rec_error < 5 * id_eps:
+    #             break
 
-            test_nproxies.append(nproxies)
-            test_rec_errors.append(rec_error)
+    #         test_nproxies.append(nproxies)
+    #         test_rec_errors.append(rec_error)
 
-            logger.info("nproxy %5d id_eps %.5e got %.12e",
-                    nproxies, id_eps, rec_error)
+    #         logger.info("nproxy %5d id_eps %.5e got %.12e",
+    #                 nproxies, id_eps, rec_error)
 
-            nproxies += nproxy_increment
+    #         nproxies += nproxy_increment
 
-        if visualize and len(test_nproxies) > 3:
-            fig = mp.figure()
-            ax = fig.gca()
+    #     # }}}
 
-            ax.semilogy(np.array(test_nproxies), np.array(test_rec_errors))
-            ax.set_xlabel(r"$\#proxies$")
-            ax.set_ylabel("$Error$")
+    #     # {{{ visualize proxy error
 
-            fig.savefig(f"{basename}_model_error_{i:02d}")
-            mp.close(fig)
+    #     if visualize and len(test_nproxies) > 3:
+    #         fig = mp.figure()
+    #         ax = fig.gca()
 
-        nproxy_empirical[i] = nproxies
-        nproxy_model[i] = nproxy_model_factor * ds.estimate_proxies_from_id_eps(
-                ambient_dim, id_eps,
-                max_target_radius, min_source_radius, proxy_radius,
-                ntargets, nsources)
-        id_rank[i] = rank
+    #         ax.semilogy(np.array(test_nproxies), np.array(test_rec_errors))
+    #         ax.set_xlabel(r"$\#proxies$")
+    #         ax.set_ylabel("$Error$")
 
-        logger.info("id_eps %.5e nproxy empirical %3d model %3d rank %3d / %3d",
-                id_eps, nproxy_empirical[i], nproxy_model[i], rank, ntargets)
+    #         fig.savefig(f"{basename}_model_error_{i:02d}")
+    #         mp.close(fig)
+
+    #     # }}}
+
+    #     nproxy_empirical[i] = nproxies
+    #     nproxy_model[i] = nproxy_model_factor * ds.estimate_proxies_from_id_eps(
+    #             ambient_dim, id_eps,
+    #             max_target_radius, min_source_radius, proxy_radius,
+    #             ntargets, nsources)
+    #     id_rank[i] = rank
+
+    #     logger.info("id_eps %.5e nproxy empirical %3d model %3d rank %3d / %3d",
+    #             id_eps, nproxy_empirical[i], nproxy_model[i], rank, ntargets)
 
     # }}}
 

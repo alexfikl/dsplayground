@@ -114,7 +114,7 @@ def make_circle(npoints: int, *, endpoint: bool = False) -> np.ndarray:
 def make_sphere(npoints: int, *, method: str = "equidistant") -> np.ndarray:
     if method == "fibonacci":
         from pytools import sphere_sample_fibonacci
-        return sphere_sample_fibonacci(npoints, r=1.0, optimize=None)
+        return sphere_sample_fibonacci(npoints, r=1.0, optimize="average")
     elif method == "equidistant":
         from pytools import sphere_sample_equidistant
         return sphere_sample_equidistant(npoints, r=1.0)
