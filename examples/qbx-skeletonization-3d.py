@@ -97,6 +97,7 @@ def run_qbx_skeletonization(ctx_factory,
     qbx_order = 4
 
     nblocks = 24
+    single_proxy_ball = True
     proxy_radius_factor = 1.25
 
     basename = "qbx_skeletonization_{}d_{}".format(ambient_dim, "_".join([
@@ -300,12 +301,14 @@ def run_qbx_skeletonization(ctx_factory,
     estimate_nproxy = ds.estimate_proxies_from_id_eps(ambient_dim, 1.0e-16,
             max_target_radius, min_source_radius, proxy_radius,
             ntargets, nsources)
+    if single_proxy_ball:
+        estimate_nproxy *= 2
 
     from pytential.linalg import QBXProxyGenerator as ProxyGenerator
     proxy = ProxyGenerator(places,
             approx_nproxy=estimate_nproxy,
             radius_factor=proxy_radius_factor,
-            _generate_ref_proxies=partial(make_proxies, single=False),
+            _generate_ref_proxies=partial(make_proxies, single=single_proxy_ball),
             )
     pxy = proxy(actx, target_dd, target_indices)
 
@@ -362,7 +365,6 @@ def run_qbx_skeletonization(ctx_factory,
         rec_errors[i] = info.error
 
         logger.info("id_eps %.5e rec error %.5e", id_eps, rec_errors[i])
-        break
 
     if visualize:
         U, _, _ = la.svd(info.error_mat)        # noqa: N806
