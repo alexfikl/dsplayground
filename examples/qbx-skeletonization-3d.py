@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from functools import partial
 from typing import Optional
 
@@ -13,6 +14,14 @@ logger = logging.getLogger(__name__)
 
 
 # {{{ skeletonize and compute errors
+
+@dataclass(frozen=True)
+class ErrorInfo:
+    error: float
+    rank: int
+    interaction_mat: np.ndarray
+    error_mat: np.ndarray
+
 
 def compute_target_reconstruction_error(
         actx, wrangler, places, mat_indices, proxy_indices, *,
@@ -49,13 +58,15 @@ def compute_target_reconstruction_error(
 
     # {{{ compute reconstruction error
 
-    rec_error = la.norm(
-            interaction_mat - P @ interaction_mat[idx, :]
-            ) / la.norm(interaction_mat)
+    error_mat = interaction_mat - P @ interaction_mat[idx, :]
+    rec_error = la.norm(error_mat) / la.norm(interaction_mat)
 
     # }}}
 
-    return rec_error, k
+    return ErrorInfo(
+            error=rec_error, rank=k,
+            interaction_mat=interaction_mat,
+            error_mat=error_mat)
 
 # }}}
 
@@ -86,7 +97,7 @@ def run_qbx_skeletonization(ctx_factory,
     qbx_order = 4
 
     nblocks = 24
-    proxy_radius_factor = 1.5
+    proxy_radius_factor = 1.25
 
     basename = "qbx_skeletonization_{}d_{}".format(ambient_dim, "_".join([
         str(v) for v in (
@@ -96,6 +107,18 @@ def run_qbx_skeletonization(ctx_factory,
             "factor", proxy_radius_factor)
         ]).replace(".", "_"))
     logger.info("basename: %s", basename)
+
+    def make_proxies(n: int, *,
+            single: bool = True,
+            method: str = "equidistant") -> np.ndarray:
+        if single:
+            return ds.make_sphere(n, method=method)
+        else:
+            assert proxy_radius_factor > 1
+            return np.hstack([
+                ds.make_sphere(n, method=method),
+                0.9 * ds.make_sphere(n, method=method)
+                ])
 
     # }}}
 
@@ -266,8 +289,9 @@ def run_qbx_skeletonization(ctx_factory,
         proxy_discr = density_discr.copy(mesh=sphere)
 
         from meshmode.discretization.visualization import make_visualizer
-        vis = make_visualizer(actx, proxy_discr, target_order)
-        vis.write_vtk_file(f"{basename}_proxy_geometry.vtu", [], overwrite=True)
+        pvis = make_visualizer(actx, proxy_discr, target_order)
+        pvis.write_vtk_file(f"{basename}_proxy_geometry.vtu", [], overwrite=True)
+        del pvis
 
     # }}}
 
@@ -275,13 +299,13 @@ def run_qbx_skeletonization(ctx_factory,
 
     estimate_nproxy = ds.estimate_proxies_from_id_eps(ambient_dim, 1.0e-16,
             max_target_radius, min_source_radius, proxy_radius,
-            ntargets, nsources) * 2
+            ntargets, nsources)
 
     from pytential.linalg import QBXProxyGenerator as ProxyGenerator
     proxy = ProxyGenerator(places,
             approx_nproxy=estimate_nproxy,
             radius_factor=proxy_radius_factor,
-            _generate_ref_proxies=partial(ds.make_sphere, method="fibonacci"),
+            _generate_ref_proxies=partial(make_proxies, single=False),
             )
     pxy = proxy(actx, target_dd, target_indices)
 
@@ -330,14 +354,34 @@ def run_qbx_skeletonization(ctx_factory,
     rec_errors = np.empty((id_eps_array.size,))
 
     for i, id_eps in enumerate(id_eps_array):
-        rec_errors[i], _ = compute_target_reconstruction_error(
+        info = compute_target_reconstruction_error(
                 actx, wrangler, places, mat_indices, proxy_indices,
                 source_dd=source_dd, target_dd=target_dd, proxy_dd=proxy_dd,
                 id_eps=id_eps,
                 )
+        rec_errors[i] = info.error
 
-        logger.info("id_eps %.5e rec error %.5e",
-                id_eps, rec_errors[i])
+        logger.info("id_eps %.5e rec error %.5e", id_eps, rec_errors[i])
+        break
+
+    if visualize:
+        U, _, _ = la.svd(info.error_mat)        # noqa: N806
+
+        from arraycontext import thaw, unflatten
+        template_ary = thaw(density_discr.nodes()[0], actx)
+
+        vec = np.zeros(density_discr.ndofs)
+        names_and_fields = []
+        for k in range(4):
+            vec[target_indices.indices] = U[:, k].ravel()
+
+            names_and_fields.append((
+                f"U_{k}", unflatten(template_ary, actx.from_numpy(vec), actx)
+                ))
+
+        vis.write_vtk_file(f"{basename}_svd_vectors.vtu",
+                names_and_fields, overwrite=True)
+
 
     # }}}
 
@@ -376,21 +420,21 @@ def run_qbx_skeletonization(ctx_factory,
     #             proxy_dd.geometry: pxy.as_sources(actx, qbx_order)
     #             })
 
-    #         rec_error, rank = compute_target_reconstruction_error(
+    #         info = compute_target_reconstruction_error(
     #                 actx, wrangler, places, mat_indices, proxy_indices,
     #                 source_dd=source_dd, target_dd=target_dd, proxy_dd=proxy_dd,
     #                 id_eps=id_eps,
     #                 verbose=False,
     #                 )
 
-    #         if rec_error < 5 * id_eps:
+    #         if info.error < 5 * id_eps:
     #             break
 
     #         test_nproxies.append(nproxies)
-    #         test_rec_errors.append(rec_error)
+    #         test_rec_errors.append(info.error)
 
     #         logger.info("nproxy %5d id_eps %.5e got %.12e",
-    #                 nproxies, id_eps, rec_error)
+    #                 nproxies, id_eps, info.error)
 
     #         nproxies += nproxy_increment
 
@@ -416,10 +460,10 @@ def run_qbx_skeletonization(ctx_factory,
     #             ambient_dim, id_eps,
     #             max_target_radius, min_source_radius, proxy_radius,
     #             ntargets, nsources)
-    #     id_rank[i] = rank
+    #     id_rank[i] = info.rank
 
     #     logger.info("id_eps %.5e nproxy empirical %3d model %3d rank %3d / %3d",
-    #             id_eps, nproxy_empirical[i], nproxy_model[i], rank, ntargets)
+    #             id_eps, nproxy_empirical[i], nproxy_model[i], info.rank, ntargets)
 
     # }}}
 
@@ -444,6 +488,8 @@ def run_qbx_skeletonization(ctx_factory,
             # convergence
             id_eps=id_eps_array,
             rec_errors=rec_errors,
+            interaction_mat=info.interaction_mat,
+            error_mat=info.error_mat,
             # model
             nproxy_empirical=nproxy_empirical,
             nproxy_model=nproxy_model,
@@ -486,6 +532,31 @@ def plot_qbx_skeletonization(filename: str) -> None:
     ax.set_ylabel(r"$Relative~Error$")
 
     fig.savefig(f"{basename}_id_eps")
+    fig.clf()
+
+    # }}}
+
+    # {{{ svd at lowest id_eps
+
+    error_mat = r["error_mat"]
+    u_mat, sigma, _ = la.svd(error_mat)
+
+    ax = fig.gca()
+    ax.semilogy(sigma, label=fr"$\sigma_{{max}} = {np.max(sigma):.5e}$")
+    ax.set_xlabel("$Target$")
+    ax.set_ylabel(r"$\sigma$")
+    ax.legend()
+
+    fig.savefig(f"{basename}_svd_values")
+    fig.clf()
+
+    ax = fig.gca()
+    for k in range(4):
+        ax.plot(u_mat[:, k], label=f"$U_{{:, {k}}}$")
+    ax.set_xlabel("$Target$")
+    ax.legend()
+
+    fig.savefig(f"{basename}_svd_uvectors")
     fig.clf()
 
     # }}}
