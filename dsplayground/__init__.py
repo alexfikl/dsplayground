@@ -40,12 +40,7 @@ __all__ = (
 def _initialize_matplotlib_defaults():
     import matplotlib
     import matplotlib.pyplot as mp
-
-    try:
-        import dufte
-        mp.style.use(dufte.style)
-    except ImportError:
-        print("'dufte' package not found")
+    mp.style.use(["science", "grid"])
 
     # FIXME: this does not seem to be a documented way to check for tex support,
     # but it works for our current usecase. it also does not catch the actual

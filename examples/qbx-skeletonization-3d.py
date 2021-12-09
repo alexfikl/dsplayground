@@ -20,6 +20,7 @@ class ErrorInfo:
     error: float
     rank: int
     interaction_mat: np.ndarray
+    rec_mat: np.ndarray
     error_mat: np.ndarray
 
 
@@ -58,7 +59,8 @@ def compute_target_reconstruction_error(
 
     # {{{ compute reconstruction error
 
-    error_mat = interaction_mat - P @ interaction_mat[idx, :]
+    rec_mat = P @ interaction_mat[idx, :]
+    error_mat = interaction_mat - rec_mat
     rec_error = la.norm(error_mat) / la.norm(interaction_mat)
 
     # }}}
@@ -66,7 +68,165 @@ def compute_target_reconstruction_error(
     return ErrorInfo(
             error=rec_error, rank=k,
             interaction_mat=interaction_mat,
+            rec_mat=rec_mat,
             error_mat=error_mat)
+
+# }}}
+
+
+# {{{ set up
+
+def make_geometry_collection(
+        actx, *,
+        nelements: int,
+        target_order: int,
+        source_ovsmp: int,
+        qbx_order: int,
+        source_name: str = "qbx",
+        ):
+    import meshmode.mesh as mmesh
+    import meshmode.mesh.generation as mgen
+    mesh = mgen.generate_torus(10, 5,
+            n_major=nelements, n_minor=nelements // 2,
+            order=target_order,
+            group_cls=mmesh.SimplexElementGroup)
+
+    from meshmode.discretization.poly_element import \
+            InterpolatoryQuadratureGroupFactory
+    from meshmode.discretization import Discretization
+    pre_density_discr = Discretization(actx, mesh,
+            group_factory=InterpolatoryQuadratureGroupFactory(target_order))
+
+    from pytential.qbx import QBXLayerPotentialSource
+    qbx = QBXLayerPotentialSource(pre_density_discr,
+            fine_order=source_ovsmp * target_order,
+            qbx_order=qbx_order,
+            fmm_order=False, fmm_backend=None,
+            _disable_refinement=True)
+
+    from pytential import GeometryCollection
+    places = GeometryCollection(qbx, auto_where=source_name)
+
+    return places
+
+
+def make_block_indices(
+        actx, density_discr, *,
+        nblocks: int,
+        itarget: Optional[int], jsource: Optional[int],
+        ):
+    from pytential.linalg.proxy import partition_by_nodes
+    max_particles_in_box = density_discr.ndofs // nblocks
+    partition = partition_by_nodes(actx, density_discr,
+            max_particles_in_box=max_particles_in_box,
+            tree_kind="adaptive-level-restricted")
+    logger.info("nblocks %5d got %5d", nblocks, partition.nblocks)
+
+    import dsplayground as ds
+    if itarget is None and jsource is None:
+        itarget = 0
+        jsource = ds.find_farthest_apart_block(
+                actx, density_discr, partition, itarget)
+    elif itarget is None and jsource is not None:
+        itarget = ds.find_farthest_apart_block(
+                actx, density_discr, partition, jsource)
+    elif itarget is not None and jsource is None:
+        jsource = ds.find_farthest_apart_block(
+                actx, density_discr, partition, itarget)
+    else:
+        assert itarget is not None and 0 <= itarget < partition.nblocks
+        assert jsource is not None and 0 <= jsource < partition.nblocks
+
+    from pytential.linalg.utils import make_block_index_from_array
+    source_indices = make_block_index_from_array(
+            [partition.block_indices(jsource)])
+    target_indices = make_block_index_from_array(
+            [partition.block_indices(itarget)])
+
+    from pytential.linalg.utils import MatrixBlockIndexRanges
+    return MatrixBlockIndexRanges(target_indices, source_indices), \
+            partition, itarget, jsource
+
+
+def merge_proxies_into_collection(actx, places, mat_indices, *,
+        approx_nproxy: int,
+        radius_factor: float,
+        source_dd, target_dd, proxy_dd,
+        single_proxy_ball: bool,
+        double_proxy_factor: float = 0.8,
+        ):
+    import dsplayground as ds
+
+    def make_proxies(n: int, *,
+            single: bool = True,
+            method: str = "equidistant") -> np.ndarray:
+        if single:
+            return ds.make_sphere(n, method=method)
+        else:
+            assert radius_factor >= 1
+            return np.hstack([
+                ds.make_sphere(n, method=method),
+                double_proxy_factor * ds.make_sphere(n, method=method)
+                ])
+
+    from pytential.linalg import QBXProxyGenerator as ProxyGenerator
+    proxy = ProxyGenerator(places,
+            approx_nproxy=approx_nproxy,
+            radius_factor=radius_factor,
+            _generate_ref_proxies=partial(make_proxies, single=single_proxy_ball),
+            )
+    pxy = proxy(actx, target_dd, mat_indices.row)
+
+    from pytential.linalg.utils import MatrixBlockIndexRanges
+    proxy_indices = MatrixBlockIndexRanges(mat_indices.row, pxy.indices)
+
+    lpot = places.get_geometry(source_dd.geometry)
+    places = places.merge({
+        proxy_dd.geometry: pxy.as_sources(actx, lpot.qbx_order)
+        })
+
+    return places, proxy_indices
+
+
+def make_wrangler(places, *, target, source):
+    from pytential.symbolic.matrix import FarFieldBlockBuilder, NearFieldBlockBuilder
+
+    def UnweightedFarFieldBlockBuilder(*args, **kwargs):      # noqa: N802
+        kwargs["_weighted"] = False
+        return FarFieldBlockBuilder(*args, **kwargs)
+
+    def WeightedFarFieldBlockBuilder(*args, **kwargs):      # noqa: N802
+        kwargs["_weighted"] = True
+        return FarFieldBlockBuilder(*args, **kwargs)
+
+    def UnweightedNearFieldBlockBuilder(*args, **kwargs):   # noqa: N802
+        kwargs["_weighted"] = False
+        return NearFieldBlockBuilder(*args, **kwargs)
+
+    def WeightedNearFieldBlockBuilder(*args, **kwargs):     # noqa: N802
+        kwargs["_weighted"] = True
+        return NearFieldBlockBuilder(*args, **kwargs)
+
+    from sumpy.kernel import LaplaceKernel
+    kernel = LaplaceKernel(places.ambient_dim)
+
+    from pytential import sym
+    sym_sigma = sym.var("sigma")
+    sym_op = sym.S(kernel, sym_sigma,
+            source=source, target=target,
+            qbx_forced_limit=+1)
+
+    from pytential.linalg.skeletonization import make_block_evaluation_wrangler
+    wrangler = make_block_evaluation_wrangler(
+            places, sym_op, sym_sigma,
+            domains=[source],
+            context={},
+            _weighted_farfield=(False, False),
+            _source_farfield_block_builder=UnweightedFarFieldBlockBuilder,
+            _target_farfield_block_builder=UnweightedNearFieldBlockBuilder,
+            _nearfield_block_builder=UnweightedNearFieldBlockBuilder)
+
+    return wrangler
 
 # }}}
 
@@ -76,7 +236,7 @@ def compute_target_reconstruction_error(
 def run_qbx_skeletonization(ctx_factory,
         itarget: Optional[int] = None,
         jsource: Optional[int] = None,
-        visualize: bool = True) -> None:
+        visualize: bool = False) -> None:
     import dsplayground as ds
     actx = ds.get_cl_array_context(ctx_factory)
 
@@ -92,13 +252,14 @@ def run_qbx_skeletonization(ctx_factory,
     ambient_dim = 3
 
     nelements = 24
-    target_order = 14
+    target_order = 16
     source_ovsmp = 1
     qbx_order = 4
 
     nblocks = 24
-    single_proxy_ball = True
     proxy_radius_factor = 1.25
+    single_proxy_ball = True
+    double_proxy_factor = 0.8
 
     basename = "qbx_skeletonization_{}d_{}".format(ambient_dim, "_".join([
         str(v) for v in (
@@ -109,42 +270,15 @@ def run_qbx_skeletonization(ctx_factory,
         ]).replace(".", "_"))
     logger.info("basename: %s", basename)
 
-    def make_proxies(n: int, *,
-            single: bool = True,
-            method: str = "equidistant") -> np.ndarray:
-        if single:
-            return ds.make_sphere(n, method=method)
-        else:
-            assert proxy_radius_factor > 1
-            return np.hstack([
-                ds.make_sphere(n, method=method),
-                0.9 * ds.make_sphere(n, method=method)
-                ])
-
     # }}}
 
     # {{{ set up geometry
 
-    import meshmode.mesh.generation as mgen
-    mesh = mgen.generate_torus(10, 5,
-            n_major=nelements, n_minor=nelements // 2,
-            order=target_order)
-
-    from meshmode.discretization.poly_element import \
-            InterpolatoryQuadratureSimplexGroupFactory
-    from meshmode.discretization import Discretization
-    pre_density_discr = Discretization(actx, mesh,
-            group_factory=InterpolatoryQuadratureSimplexGroupFactory(target_order))
-
-    from pytential.qbx import QBXLayerPotentialSource
-    qbx = QBXLayerPotentialSource(pre_density_discr,
-            fine_order=source_ovsmp * target_order,
+    places = make_geometry_collection(actx,
+            nelements=nelements,
+            target_order=target_order, source_ovsmp=source_ovsmp,
             qbx_order=qbx_order,
-            fmm_order=False, fmm_backend=None,
-            _disable_refinement=True)
-
-    from pytential import GeometryCollection
-    places = GeometryCollection(qbx, auto_where="qbx")
+            source_name="qbx")
     density_discr = places.get_discretization("qbx")
 
     logger.info("nelements:     %d", density_discr.mesh.nelements)
@@ -155,60 +289,24 @@ def run_qbx_skeletonization(ctx_factory,
     proxy_dd = source_dd.copy(geometry="proxy")
 
     if visualize:
+        from pytential import bind, sym
+        normals = bind(places,
+                sym.normal(places.ambient_dim).as_vector(),
+                auto_where=source_dd)(actx)
+
         from meshmode.discretization.visualization import make_visualizer
-        vis = make_visualizer(actx, density_discr, target_order)
+        vis = make_visualizer(actx, density_discr)
         vis.write_vtk_file(f"{basename}_geometry.vtu", [], overwrite=True)
-
-    # }}}
-
-    # {{{ set up symbolic operator
-
-    from sumpy.kernel import LaplaceKernel
-    kernel = LaplaceKernel(ambient_dim)
-
-    from pytential import sym
-    sym_sigma = sym.var("sigma")
-    sym_op = sym.S(kernel, sym_sigma,
-            source=source_dd, target=target_dd,
-            qbx_forced_limit=+1)
 
     # }}}
 
     # {{{ set up indices
 
-    from pytential.linalg.proxy import partition_by_nodes
-    max_particles_in_box = density_discr.ndofs // nblocks
-    partition = partition_by_nodes(actx, density_discr,
-            max_particles_in_box=max_particles_in_box,
-            tree_kind="adaptive-level-restricted")
-    logger.info("nblocks %5d got %5d", nblocks, partition.nblocks)
+    mat_indices, partition, itarget, jsource = make_block_indices(
+            actx, density_discr,
+            nblocks=nblocks,
+            itarget=itarget, jsource=jsource)
     nblocks = partition.nblocks
-
-    if itarget is None and jsource is None:
-        itarget = 0
-        jsource = ds.find_farthest_apart_block(
-                actx, density_discr, partition, itarget)
-    elif itarget is None and jsource is not None:
-        itarget = ds.find_farthest_apart_block(
-                actx, density_discr, partition, jsource)
-    elif itarget is not None and jsource is None:
-        jsource = ds.find_farthest_apart_block(
-                actx, density_discr, partition, itarget)
-    else:
-        pass
-
-    from pytential.linalg.utils import make_block_index_from_array
-    source_indices = make_block_index_from_array(
-            [partition.block_indices(jsource)])
-    target_indices = make_block_index_from_array(
-            [partition.block_indices(itarget)])
-
-    from pytential.linalg.utils import MatrixBlockIndexRanges
-    mat_indices = MatrixBlockIndexRanges(target_indices, source_indices)
-
-    # }}}
-
-    # {{{ visualize partition sizes
 
     if visualize:
         block_sizes = np.array([partition.block_size(i) for i in range(nblocks)])
@@ -228,14 +326,10 @@ def run_qbx_skeletonization(ctx_factory,
         fig.savefig(f"{basename}_block_sizes")
         mp.close(fig)
 
-    # }}}
-
-    # {{{ plot indices and proxies
-
     if visualize:
         marker = np.zeros(density_discr.ndofs)
-        marker[source_indices.indices] = 1
-        marker[target_indices.indices] = -1
+        marker[mat_indices.col.indices] = 1
+        marker[mat_indices.row.indices] = -1
 
         from arraycontext import thaw, unflatten
         template_ary = thaw(density_discr.nodes()[0], actx)
@@ -248,13 +342,13 @@ def run_qbx_skeletonization(ctx_factory,
 
     # {{{ get block centers and radii
 
-    nsources = source_indices.indices.size
-    ntargets = target_indices.indices.size
+    nsources = mat_indices.col.indices.size
+    ntargets = mat_indices.row.indices.size
     logger.info("ntargets %4d nsources %4d", ntargets, nsources)
 
     nodes = ds.get_discr_nodes(density_discr)
-    source_nodes = source_indices.block_take(nodes.T, 0).T
-    target_nodes = target_indices.block_take(nodes.T, 0).T
+    source_nodes = mat_indices.col.block_take(nodes.T, 0).T
+    target_nodes = mat_indices.row.block_take(nodes.T, 0).T
 
     source_radius, source_center = ds.get_point_radius_and_center(source_nodes)
     logger.info("sources: radius %.5e center %s", source_radius, source_center)
@@ -277,7 +371,23 @@ def run_qbx_skeletonization(ctx_factory,
 
     # }}}
 
-    # {{{ plot proxy ball
+    # {{{ set up proxies
+
+    estimate_nproxy = ds.estimate_proxies_from_id_eps(ambient_dim, 1.0e-16,
+            max_target_radius, min_source_radius, proxy_radius,
+            ntargets, nsources)
+    if single_proxy_ball:
+        estimate_nproxy *= 2
+
+    places, proxy_indices = merge_proxies_into_collection(actx, places, mat_indices,
+            approx_nproxy=estimate_nproxy,
+            radius_factor=proxy_radius_factor,
+            source_dd=source_dd, target_dd=target_dd, proxy_dd=proxy_dd,
+            single_proxy_ball=single_proxy_ball,
+            double_proxy_factor=double_proxy_factor,
+            )
+
+    wrangler = make_wrangler(places, target=target_dd, source=source_dd)
 
     if visualize:
         import meshmode.mesh.generation as mgen
@@ -296,64 +406,30 @@ def run_qbx_skeletonization(ctx_factory,
 
     # }}}
 
-    # {{{ set up proxies
+    # {{{ errors
 
-    estimate_nproxy = ds.estimate_proxies_from_id_eps(ambient_dim, 1.0e-16,
-            max_target_radius, min_source_radius, proxy_radius,
-            ntargets, nsources)
-    if single_proxy_ball:
-        estimate_nproxy *= 2
-
-    from pytential.linalg import QBXProxyGenerator as ProxyGenerator
-    proxy = ProxyGenerator(places,
-            approx_nproxy=estimate_nproxy,
-            radius_factor=proxy_radius_factor,
-            _generate_ref_proxies=partial(make_proxies, single=single_proxy_ball),
+    # NOTE: everything in here is going to go into an `npz` file for storage
+    cache = dict(
+            # parameters
+            ambient_dim=ambient_dim,
+            nelements=nelements,
+            target_order=target_order,
+            source_ovsmp=source_ovsmp,
+            qbx_order=qbx_order,
+            # skeletonization
+            nblocks=nblocks,
+            proxy_radius_factory=proxy_radius_factor,
+            ntargets=ntargets, itarget=itarget,
+            nsources=nsources, jsource=jsource,
+            target_center=target_center, target_radius=target_radius,
+            source_center=source_center, source_radius=source_radius,
+            proxy_radius=proxy_radius,
             )
-    pxy = proxy(actx, target_dd, target_indices)
-
-    proxy_indices = MatrixBlockIndexRanges(target_indices, pxy.indices)
-    places = places.merge({
-        proxy_dd.geometry: pxy.as_sources(actx, qbx_order)
-        })
-
-    # }}}
-
-    # {{{ set up wrangler
-
-    from pytential.symbolic.matrix import FarFieldBlockBuilder, NearFieldBlockBuilder
-
-    def UnweightedFarFieldBlockBuilder(*args, **kwargs):      # noqa: N802
-        kwargs["_weighted"] = False
-        return FarFieldBlockBuilder(*args, **kwargs)
-
-    def WeightedFarFieldBlockBuilder(*args, **kwargs):      # noqa: N802
-        kwargs["_weighted"] = True
-        return FarFieldBlockBuilder(*args, **kwargs)
-
-    def UnweightedNearFieldBlockBuilder(*args, **kwargs):   # noqa: N802
-        kwargs["_weighted"] = False
-        return NearFieldBlockBuilder(*args, **kwargs)
-
-    def WeightedNearFieldBlockBuilder(*args, **kwargs):     # noqa: N802
-        kwargs["_weighted"] = True
-        return NearFieldBlockBuilder(*args, **kwargs)
-
-    from pytential.linalg.skeletonization import make_block_evaluation_wrangler
-    wrangler = make_block_evaluation_wrangler(
-            places, sym_op, sym_sigma,
-            domains=[source_dd],
-            context={},
-            _weighted_farfield=(False, False),
-            _source_farfield_block_builder=UnweightedFarFieldBlockBuilder,
-            _target_farfield_block_builder=UnweightedNearFieldBlockBuilder,
-            _nearfield_block_builder=UnweightedNearFieldBlockBuilder)
-
-    # }}}
 
     # {{{ error vs. id_eps
 
-    id_eps_array = 10.0**(-np.arange(2, 16))
+    id_eps_array = 10.0**(-np.arange(2, 12))
+    id_eps_array = 10.0**(-np.array([12]))
     rec_errors = np.empty((id_eps_array.size,))
 
     for i, id_eps in enumerate(id_eps_array):
@@ -367,31 +443,96 @@ def run_qbx_skeletonization(ctx_factory,
         logger.info("id_eps %.5e rec error %.5e", id_eps, rec_errors[i])
 
     if visualize:
-        U, _, _ = la.svd(info.error_mat)        # noqa: N806
+        U, _, V = la.svd(info.error_mat)        # noqa: N806
 
         from arraycontext import thaw, unflatten
         template_ary = thaw(density_discr.nodes()[0], actx)
 
         vec = np.zeros(density_discr.ndofs)
-        names_and_fields = []
+        names_and_fields = [("normal", normals)]
         for k in range(4):
-            vec[target_indices.indices] = U[:, k].ravel()
-
+            vec[mat_indices.row.indices] = U[:, k].ravel()
             names_and_fields.append((
                 f"U_{k}", unflatten(template_ary, actx.from_numpy(vec), actx)
+                ))
+
+            vec[:] = 0.0
+            vec[mat_indices.col.indices] = V[k, :].ravel()
+            names_and_fields.append((
+                f"V_{k}", unflatten(template_ary, actx.from_numpy(vec), actx)
                 ))
 
         vis.write_vtk_file(f"{basename}_svd_vectors.vtu",
                 names_and_fields, overwrite=True)
 
+        names_and_fields = [("normal", normals)]
+        for k in range(4):
+            density = V[k, :].ravel()
+
+            vec[mat_indices.row.indices] = info.rec_mat @ density
+            names_and_fields.append((
+                f"rec_mat_{k}", unflatten(template_ary, actx.from_numpy(vec), actx)
+                ))
+
+            vec[mat_indices.row.indices] = info.interaction_mat @ density
+            names_and_fields.append((
+                f"int_mat_{k}", unflatten(template_ary, actx.from_numpy(vec), actx)
+                ))
+
+        vis.write_vtk_file(f"{basename}_svd_density.vtu",
+                names_and_fields, overwrite=True)
+
+    cache.update({
+        "id_eps": id_eps_array,
+        "rec_errors": rec_errors,
+        "interaction_mat": info.interaction_mat,
+        "error_mat": info.error_mat,
+        })
 
     # }}}
 
-    # {{{ error vs model
+    # # {{{ error vs proxy radius
 
-    nproxy_empirical = np.empty(id_eps_array.size, dtype=np.int64)
-    nproxy_model = np.empty(id_eps_array.size, dtype=np.int64)
-    id_rank = np.empty(id_eps_array.size, dtype=np.int64)
+    # proxy_radius_eps = np.array([1.0e-5, 1.0e-11, 1.0e-15])
+    # if single_proxy_ball:
+    #     proxy_radius_factors = np.linspace(1.0, 2.0, 8)
+    # else:
+    #     proxy_radius_factors = np.linspace(1.0 / double_proxy_factor, 2.0, 8)
+    # proxy_radius_errors = np.empty((proxy_radius_eps.size, proxy_radius_factors.size))
+
+    # for j in range(proxy_radius_factors.size):
+    #     places, proxy_indices = merge_proxies_into_collection(
+    #             actx, places, mat_indices,
+    #             approx_nproxy=estimate_nproxy,
+    #             radius_factor=proxy_radius_factors[j],
+    #             single_proxy_ball=single_proxy_ball,
+    #             source_dd=source_dd, target_dd=target_dd, proxy_dd=proxy_dd)
+
+    #     wrangler = make_wrangler(places, target=target_dd, source=source_dd)
+
+    #     for i in range(proxy_radius_eps.size):
+    #         info = compute_target_reconstruction_error(
+    #                 actx, wrangler, places, mat_indices, proxy_indices,
+    #                 source_dd=source_dd, target_dd=target_dd, proxy_dd=proxy_dd,
+    #                 id_eps=proxy_radius_eps[i])
+
+    #         proxy_radius_errors[i, j] = info.error
+    #         logger.info("factor %.5e eps %.5e error %.12e",
+    #                 proxy_radius_factors[j], proxy_radius_eps[i], info.error)
+
+    # cache.update({
+    #     "proxy_radius_factors": proxy_radius_factors,
+    #     "proxy_radius_eps": proxy_radius_eps,
+    #     "proxy_radius_errors": proxy_radius_errors,
+    #     })
+
+    # # }}}
+
+    # # {{{ error vs model
+
+    # nproxy_empirical = np.empty(id_eps_array.size, dtype=np.int64)
+    # nproxy_model = np.empty(id_eps_array.size, dtype=np.int64)
+    # id_rank = np.empty(id_eps_array.size, dtype=np.int64)
 
     # nproxies = 3
     # nproxy_increment = 4
@@ -467,39 +608,19 @@ def run_qbx_skeletonization(ctx_factory,
     #     logger.info("id_eps %.5e nproxy empirical %3d model %3d rank %3d / %3d",
     #             id_eps, nproxy_empirical[i], nproxy_model[i], info.rank, ntargets)
 
-    # }}}
+    # cache.update({
+    #     "nproxy_empirical": nproxy_empirical,
+    #     "nproxy_model": nproxy_model,
+    #     "id_rank": id_rank,
+    #     })
+
+    # # }}}
 
     # {{{ save and plot
 
     filename = f"{basename}.npz"
-    np.savez_compressed(filename,
-            # parameters
-            ambient_dim=ambient_dim,
-            nelements=nelements,
-            target_order=target_order,
-            source_ovsmp=source_ovsmp,
-            qbx_order=qbx_order,
-            # skeletonization
-            nblocks=nblocks,
-            proxy_radius_factory=proxy_radius_factor,
-            ntargets=ntargets, itarget=itarget,
-            nsources=nsources, jsource=jsource,
-            target_center=target_center, target_radius=target_radius,
-            source_center=source_center, source_radius=source_radius,
-            proxy_radius=proxy_radius,
-            # convergence
-            id_eps=id_eps_array,
-            rec_errors=rec_errors,
-            interaction_mat=info.interaction_mat,
-            error_mat=info.error_mat,
-            # model
-            nproxy_empirical=nproxy_empirical,
-            nproxy_model=nproxy_model,
-            id_rank=id_rank,
-            )
-
-    if visualize:
-        plot_qbx_skeletonization(filename)
+    np.savez_compressed(filename, **cache)
+    plot_qbx_skeletonization(filename)
 
     # }}}
 
@@ -507,7 +628,6 @@ def run_qbx_skeletonization(ctx_factory,
 
 
 # {{{ plot
-
 
 def plot_qbx_skeletonization(filename: str) -> None:
     import dsplayground as ds           # noqa: F401
@@ -521,64 +641,88 @@ def plot_qbx_skeletonization(filename: str) -> None:
 
     # {{{ convergence vs id_eps
 
-    ax = fig.gca()
+    if "rec_errors" in r:
+        ax = fig.gca()
+        id_eps = r["id_eps"]
+        rec_errors = r["rec_errors"]
 
-    id_eps = r["id_eps"]
-    rec_errors = r["rec_errors"]
+        ax = fig.gca()
 
-    ax = fig.gca()
+        ax.loglog(id_eps, rec_errors, "o-")
+        ax.loglog(id_eps, id_eps, "k--")
+        ax.set_xlabel(r"$\epsilon_{id}$")
+        ax.set_ylabel(r"$Relative~Error$")
 
-    ax.loglog(id_eps, rec_errors, "o-")
-    ax.loglog(id_eps, id_eps, "k--")
-    ax.set_xlabel(r"$\epsilon_{id}$")
-    ax.set_ylabel(r"$Relative~Error$")
-
-    fig.savefig(f"{basename}_id_eps")
-    fig.clf()
+        fig.savefig(f"{basename}_id_eps")
+        fig.clf()
 
     # }}}
 
     # {{{ svd at lowest id_eps
 
-    error_mat = r["error_mat"]
-    u_mat, sigma, _ = la.svd(error_mat)
+    if "error_mat" in r:
+        error_mat = r["error_mat"]
+        u_mat, sigma, _ = la.svd(error_mat)
 
-    ax = fig.gca()
-    ax.semilogy(sigma, label=fr"$\sigma_{{max}} = {np.max(sigma):.5e}$")
-    ax.set_xlabel("$Target$")
-    ax.set_ylabel(r"$\sigma$")
-    ax.legend()
+        ax = fig.gca()
+        ax.semilogy(sigma, label=fr"$\sigma_{{max}} = {np.max(sigma):.5e}$")
+        ax.set_xlabel("$Target$")
+        ax.set_ylabel(r"$\sigma$")
+        ax.legend()
 
-    fig.savefig(f"{basename}_svd_values")
-    fig.clf()
+        fig.savefig(f"{basename}_svd_values")
+        fig.clf()
 
-    ax = fig.gca()
-    for k in range(4):
-        ax.plot(u_mat[:, k], label=f"$U_{{:, {k}}}$")
-    ax.set_xlabel("$Target$")
-    ax.legend()
+        ax = fig.gca()
+        for k in range(4):
+            ax.plot(u_mat[:, k], label=f"$U_{{:, {k}}}$")
+        ax.set_xlabel("$Target$")
+        ax.legend()
 
-    fig.savefig(f"{basename}_svd_uvectors")
-    fig.clf()
+        fig.savefig(f"{basename}_svd_uvectors")
+        fig.clf()
+
+    # }}}
+
+    # {{{
+
+    if "proxy_radius_factors" in r:
+        proxy_radius_factors = r["proxy_radius_factors"]
+        proxy_radius_eps = r["proxy_radius_eps"]
+        proxy_radius_errors = r["proxy_radius_errors"]
+
+        ax = fig.gca()
+
+        for i in range(proxy_radius_errors.shape[0]):
+            ax.semilogy(proxy_radius_factors, proxy_radius_errors[i], "o-",
+                    label=fr"$\epsilon = {proxy_radius_eps[i]:.1e}$")
+            ax.axhline(proxy_radius_eps[i], color="k", ls="--")
+
+        ax.set_xlabel(r"$\alpha$")
+        ax.set_ylabel("$Relative~Error$")
+
+        fig.savefig(f"{basename}_proxy_radius_factor")
+        fig.clf()
 
     # }}}
 
     # {{{ convergence vs model
 
-    nproxy_empirical = r["nproxy_empirical"]
-    nproxy_model = r["nproxy_model"]
+    if "nproxy_empirical" in r:
+        nproxy_empirical = r["nproxy_empirical"]
+        nproxy_model = r["nproxy_model"]
 
-    ax = fig.gca()
+        ax = fig.gca()
 
-    ax.semilogx(id_eps, nproxy_empirical, "o-", label="$Empirical$")
-    # ax.semilogx(id_eps_array, id_rank, "o-", label="$Rank$")
-    ax.semilogx(id_eps, nproxy_model, "ko-", label="$Model$")
-    ax.set_xlabel(r"$\epsilon$")
-    ax.set_ylabel(r"$\#~proxy$")
-    ax.legend()
+        ax.semilogx(id_eps, nproxy_empirical, "o-", label="$Empirical$")
+        # ax.semilogx(id_eps_array, id_rank, "o-", label="$Rank$")
+        ax.semilogx(id_eps, nproxy_model, "ko-", label="$Model$")
+        ax.set_xlabel(r"$\epsilon$")
+        ax.set_ylabel(r"$\#~proxy$")
+        ax.legend()
 
-    fig.savefig(f"{basename}_model_vs_empirical")
-    fig.clf()
+        fig.savefig(f"{basename}_model_vs_empirical")
+        fig.clf()
 
     # }}}
 
