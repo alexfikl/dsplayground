@@ -86,10 +86,12 @@ def make_geometry_collection(
         ):
     import meshmode.mesh as mmesh
     import meshmode.mesh.generation as mgen
-    mesh = mgen.generate_torus(10, 5,
-            n_major=nelements, n_minor=nelements // 2,
+    mesh = mgen.generate_torus(1, 0.5,
+            n_major=nelements, n_minor=nelements,
             order=target_order,
-            group_cls=mmesh.SimplexElementGroup)
+            # group_cls=mmesh.SimplexElementGroup,
+            group_cls=mmesh.TensorProductElementGroup,
+            )
 
     from meshmode.discretization.poly_element import \
             InterpolatoryQuadratureGroupFactory
@@ -251,12 +253,13 @@ def run_qbx_skeletonization(ctx_factory,
 
     ambient_dim = 3
 
+    nelements = 2
     nelements = 24
-    target_order = 16
+    target_order = 8
     source_ovsmp = 1
     qbx_order = 4
 
-    nblocks = 24
+    nblocks = 56
     proxy_radius_factor = 1.25
     single_proxy_ball = True
     double_proxy_factor = 0.8
@@ -290,13 +293,26 @@ def run_qbx_skeletonization(ctx_factory,
 
     if visualize:
         from pytential import bind, sym
+        # from pytential.symbolic.primitives import \
+        #         _simplex_mapping_singular_values as _max_stretch_factor
+        from pytential.symbolic.primitives import \
+                _hypercube_mapping_singular_values as _max_stretch_factor
         normals = bind(places,
                 sym.normal(places.ambient_dim).as_vector(),
                 auto_where=source_dd)(actx)
+        stretches = bind(places,
+                _max_stretch_factor(places.ambient_dim, with_elementwise_max=False),
+                auto_where=source_dd)(actx)
 
         from meshmode.discretization.visualization import make_visualizer
-        vis = make_visualizer(actx, density_discr)
-        vis.write_vtk_file(f"{basename}_geometry.vtu", [], overwrite=True)
+        vis = make_visualizer(actx, density_discr, target_order, force_equidistant=True)
+        vis.write_vtk_file(f"{basename}_geometry.vtu", [
+            ("stretch_0", stretches[0]),
+            ("stretch_1", stretches[1]),
+            ("normal", normals)
+            ], overwrite=True, use_high_order=True)
+
+    return
 
     # }}}
 
@@ -428,8 +444,8 @@ def run_qbx_skeletonization(ctx_factory,
 
     # {{{ error vs. id_eps
 
-    id_eps_array = 10.0**(-np.arange(2, 12))
-    id_eps_array = 10.0**(-np.array([12]))
+    id_eps_array = 10.0**(-np.arange(2, 16))
+    # id_eps_array = 10.0**(-np.array([12]))
     rec_errors = np.empty((id_eps_array.size,))
 
     for i, id_eps in enumerate(id_eps_array):
