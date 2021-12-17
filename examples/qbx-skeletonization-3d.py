@@ -87,7 +87,7 @@ def make_geometry_collection(
     import meshmode.mesh as mmesh
     import meshmode.mesh.generation as mgen
     mesh = mgen.generate_torus(1, 0.5,
-            n_major=nelements, n_minor=nelements,
+            n_major=nelements, n_minor=nelements // 2,
             order=target_order,
             # group_cls=mmesh.SimplexElementGroup,
             group_cls=mmesh.TensorProductElementGroup,
@@ -230,6 +230,35 @@ def make_wrangler(places, *, target, source):
 
     return wrangler
 
+
+def simplex_mapping_singular_values(ambient_dim):
+    from pytential import sym
+    from pytential.symbolic.primitives import (
+            _equilateral_parametrization_derivative_matrix,
+            _small_mat_eigenvalues)
+
+    pder = _equilateral_parametrization_derivative_matrix(
+            ambient_dim, ambient_dim - 1)
+    form1 = sym.cse(pder.T @ pder)
+
+    return [
+            sym.cse(sym.sqrt(s), f"simplex_mapping_singval_{i}")
+            for i, s in enumerate(_small_mat_eigenvalues(4 * form1))
+            ]
+
+
+def hypercube_mapping_singular_values(ambient_dim):
+    from pytential import sym
+    from pytential.symbolic.primitives import _small_mat_eigenvalues
+
+    pder = sym.parametrization_derivative_matrix(ambient_dim, ambient_dim - 1)
+    form1 = sym.cse(pder.T @ pder)
+
+    return [
+            sym.cse(sym.sqrt(s), f"simplex_mapping_singval_{i}")
+            for i, s in enumerate(_small_mat_eigenvalues(4 * form1))
+            ]
+
 # }}}
 
 
@@ -253,13 +282,12 @@ def run_qbx_skeletonization(ctx_factory,
 
     ambient_dim = 3
 
-    nelements = 2
     nelements = 24
-    target_order = 8
+    target_order = 16
     source_ovsmp = 1
     qbx_order = 4
 
-    nblocks = 56
+    nblocks = 24
     proxy_radius_factor = 1.25
     single_proxy_ball = True
     double_proxy_factor = 0.8
@@ -293,15 +321,14 @@ def run_qbx_skeletonization(ctx_factory,
 
     if visualize:
         from pytential import bind, sym
-        # from pytential.symbolic.primitives import \
-        #         _simplex_mapping_singular_values as _max_stretch_factor
-        from pytential.symbolic.primitives import \
-                _hypercube_mapping_singular_values as _max_stretch_factor
+        # mapping_stretch_factors = simplex_mapping_singular_values
+        mapping_stretch_factors = hypercube_mapping_singular_values
+
         normals = bind(places,
                 sym.normal(places.ambient_dim).as_vector(),
                 auto_where=source_dd)(actx)
         stretches = bind(places,
-                _max_stretch_factor(places.ambient_dim, with_elementwise_max=False),
+                mapping_stretch_factors(places.ambient_dim),
                 auto_where=source_dd)(actx)
 
         from meshmode.discretization.visualization import make_visualizer
@@ -311,8 +338,6 @@ def run_qbx_skeletonization(ctx_factory,
             ("stretch_1", stretches[1]),
             ("normal", normals)
             ], overwrite=True, use_high_order=True)
-
-    return
 
     # }}}
 
@@ -459,7 +484,7 @@ def run_qbx_skeletonization(ctx_factory,
         logger.info("id_eps %.5e rec error %.5e", id_eps, rec_errors[i])
 
     if visualize:
-        U, _, V = la.svd(info.error_mat)        # noqa: N806
+        U, sigma, V = la.svd(info.error_mat)        # noqa: N806
 
         from arraycontext import thaw, unflatten
         template_ary = thaw(density_discr.nodes()[0], actx)
