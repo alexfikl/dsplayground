@@ -7,7 +7,7 @@ flake8:
 	@echo -e "\e[1;32mflake8 clean!\e[0m"
 
 pylint:
-	$(PYTHON) -m pylint dsplayground tests/*.py
+	PYTHONWARNINGS=ignore $(PYTHON) -m pylint dsplayground tests/*.py
 	@echo -e "\e[1;32mpylint clean!\e[0m"
 
 mypy:
