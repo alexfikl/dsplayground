@@ -13,7 +13,7 @@ import matplotlib.patches as patch
 
 from pytential import bind, sym
 from pytential.linalg.utils import MatrixBlockIndexRanges
-from pytools import memoize_in, memoize_on_first_arg
+from pytools import memoize_in
 
 import logging
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ def find_source_in_proxy_ball(
 
     import dsplayground as ds
     discr = places.get_discretization(source_dd.geometry, source_dd.discr_stage)
-    nodes = ds.get_numpy_nodes(discr)
+    nodes = ds.get_discr_nodes(discr)
 
     source_nodes = index_set.col.block_take(nodes.T, 0).T
     mask = la.norm(
@@ -89,7 +89,8 @@ def compute_target_reconstruction_error(
                 actx, places, direct, proxy,
                 proxy_center=proxy_center, proxy_radius=proxy_radius,
                 )
-        logger.info("found %d neighbors", neighbors.nsources)
+        if verbose:
+            logger.info("found %d neighbors", neighbors.nsources)
 
         if neighbors.nsources > 0:
             neighbors_mat = neighbors.interaction_mat(places)
@@ -134,7 +135,7 @@ def compute_target_reconstruction_error(
 
 
 def main(ctx_factory,
-        itarget: Optional[int] = None,
+        itarget: Optional[int] = None, jsource: Optional[int] = None,
         use_p2p_proxy: bool = False,
         visualize: bool = True) -> None:
     import dsplayground as ds
@@ -147,7 +148,7 @@ def main(ctx_factory,
 
     ambient_dim = 2
 
-    nelements = 64
+    nelements = 128
     target_order = 16
     qbx_order = 4
 
@@ -209,17 +210,22 @@ def main(ctx_factory,
     # expect that nblocks // 2 is about opposite to 0
     if itarget is None:
         itarget = nblocks // 2
+    if jsource is None:
+        jsource = 0
 
     source_indices = make_block_index_from_array(
-            [partition.block_indices(0)])
+            [partition.block_indices(jsource)])
     target_indices = make_block_index_from_array(
             [partition.block_indices(itarget)])
+
+    logger.info("itarget %3d jsource %3d", itarget, jsource)
+    logger.info("ranges: %s", np.diff(partition.ranges))
 
     # }}}
 
     # {{{ determine radii
 
-    nodes = get_numpy_nodes(density_discr)
+    nodes = ds.get_discr_nodes(density_discr)
     source_nodes = source_indices.block_take(nodes.T, 0).T
     target_nodes = target_indices.block_take(nodes.T, 0).T
 
@@ -326,7 +332,7 @@ def main(ctx_factory,
 
     estimate_nproxies = ds.estimate_proxies_from_id_eps(ambient_dim, 1.0e-16,
             max_target_radius, min_source_radius, proxy_radius,
-            ntargets, nsources) + 16
+            ntargets, nsources) + 32
 
     proxies = make_source_proxies(estimate_nproxies)
     places = places.merge({proxy_dd.geometry: proxies})
@@ -376,8 +382,6 @@ def main(ctx_factory,
 
         fig.savefig(f"qbx_multipole_error_{key}_model_vs_id_eps")
         mp.close(fig)
-
-    return
 
     # }}}
 

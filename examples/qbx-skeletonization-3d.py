@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from functools import partial
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import numpy.linalg as la
@@ -25,19 +25,19 @@ class ErrorInfo:
 
 
 def compute_target_reconstruction_error(
-        actx, wrangler, places, mat_indices, proxy_indices, *,
+        actx, wrangler, places, mat_indices, pxy, *,
         source_dd, target_dd, proxy_dd, id_eps,
         verbose=True):
     # {{{ evaluate matrices
 
-    proxy_mat = wrangler.evaluate_target_farfield(
-            actx, places, 0, 0, proxy_indices,
-            auto_where=(proxy_dd, target_dd))
-    proxy_mat = proxy_mat.reshape(proxy_indices.block_shape(0, 0))
+    proxy_mat, pxyindices = wrangler.evaluate_target_farfield(
+            actx, places, pxy, None,
+            ibrow=0, ibcol=0)
+    proxy_mat = proxy_mat.reshape(pxyindices.block_shape(0, 0))
 
-    interaction_mat = wrangler.evaluate_nearfield(
-            actx, places, 0, 0, mat_indices,
-            auto_where=(source_dd, target_dd))
+    interaction_mat = wrangler._evaluate_nearfield(
+            actx, places, mat_indices,
+            ibrow=0, ibcol=0)
     interaction_mat = interaction_mat.reshape(mat_indices.block_shape(0, 0))
 
     # }}}
@@ -50,8 +50,13 @@ def compute_target_reconstruction_error(
 
     id_error = la.norm(proxy_mat - P @ proxy_mat[idx, :]) / la.norm(proxy_mat)
     if verbose:
+        if proxy_mat.shape[0] < 1000:
+            rank = la.matrix_rank(proxy_mat, tol=id_eps)
+        else:
+            rank = -1
+
         logger.info("id_rank:   %3d num_rank %3d nproxy %4d",
-                idx.size, la.matrix_rank(proxy_mat, tol=id_eps), proxy_mat.shape[1])
+                idx.size, rank, proxy_mat.shape[1])
         logger.info("id_error:  %.15e (eps %.5e)", id_error, id_eps)
         logger.info("\n")
 
@@ -89,8 +94,8 @@ def make_geometry_collection(
     mesh = mgen.generate_torus(1, 0.5,
             n_major=nelements, n_minor=nelements // 2,
             order=target_order,
-            # group_cls=mmesh.SimplexElementGroup,
-            group_cls=mmesh.TensorProductElementGroup,
+            group_cls=mmesh.SimplexElementGroup,
+            # group_cls=mmesh.TensorProductElementGroup,
             )
 
     from meshmode.discretization.poly_element import \
@@ -150,10 +155,10 @@ def make_block_indices(
             partition, itarget, jsource
 
 
-def merge_proxies_into_collection(actx, places, mat_indices, *,
+def make_proxies_for_collection(actx, places, mat_indices, *,
         approx_nproxy: int,
         radius_factor: float,
-        source_dd, target_dd, proxy_dd,
+        dofdesc: Any,
         single_proxy_ball: bool,
         double_proxy_factor: float = 0.8,
         ):
@@ -177,17 +182,8 @@ def merge_proxies_into_collection(actx, places, mat_indices, *,
             radius_factor=radius_factor,
             _generate_ref_proxies=partial(make_proxies, single=single_proxy_ball),
             )
-    pxy = proxy(actx, target_dd, mat_indices.row)
 
-    from pytential.linalg.utils import MatrixBlockIndexRanges
-    proxy_indices = MatrixBlockIndexRanges(mat_indices.row, pxy.indices)
-
-    lpot = places.get_geometry(source_dd.geometry)
-    places = places.merge({
-        proxy_dd.geometry: pxy.as_sources(actx, lpot.qbx_order)
-        })
-
-    return places, proxy_indices
+    return proxy(actx, dofdesc, mat_indices.row)
 
 
 def make_wrangler(places, *, target, source):
@@ -218,8 +214,8 @@ def make_wrangler(places, *, target, source):
             source=source, target=target,
             qbx_forced_limit=+1)
 
-    from pytential.linalg.skeletonization import make_block_evaluation_wrangler
-    wrangler = make_block_evaluation_wrangler(
+    from pytential.linalg.skeletonization import make_skeletonization_wrangler
+    wrangler = make_skeletonization_wrangler(
             places, sym_op, sym_sigma,
             domains=[source],
             context={},
@@ -299,7 +295,10 @@ def run_qbx_skeletonization(ctx_factory,
             "qbx", qbx_order,
             "factor", proxy_radius_factor)
         ]).replace(".", "_"))
-    logger.info("basename: %s", basename)
+
+    import os
+    logger.info("pid:       %s", os.getpid())
+    logger.info("basename:  %s", basename)
 
     # }}}
 
@@ -321,8 +320,8 @@ def run_qbx_skeletonization(ctx_factory,
 
     if visualize:
         from pytential import bind, sym
-        # mapping_stretch_factors = simplex_mapping_singular_values
-        mapping_stretch_factors = hypercube_mapping_singular_values
+        mapping_stretch_factors = simplex_mapping_singular_values
+        # mapping_stretch_factors = hypercube_mapping_singular_values
 
         normals = bind(places,
                 sym.normal(places.ambient_dim).as_vector(),
@@ -419,11 +418,12 @@ def run_qbx_skeletonization(ctx_factory,
             ntargets, nsources)
     if single_proxy_ball:
         estimate_nproxy *= 2
+    logger.info("estimate_nproxy: %d", estimate_nproxy)
 
-    places, proxy_indices = merge_proxies_into_collection(actx, places, mat_indices,
+    pxy = make_proxies_for_collection(actx, places, mat_indices,
             approx_nproxy=estimate_nproxy,
             radius_factor=proxy_radius_factor,
-            source_dd=source_dd, target_dd=target_dd, proxy_dd=proxy_dd,
+            dofdesc=target_dd,
             single_proxy_ball=single_proxy_ball,
             double_proxy_factor=double_proxy_factor,
             )
@@ -475,7 +475,7 @@ def run_qbx_skeletonization(ctx_factory,
 
     for i, id_eps in enumerate(id_eps_array):
         info = compute_target_reconstruction_error(
-                actx, wrangler, places, mat_indices, proxy_indices,
+                actx, wrangler, places, mat_indices, pxy,
                 source_dd=source_dd, target_dd=target_dd, proxy_dd=proxy_dd,
                 id_eps=id_eps,
                 )
@@ -483,7 +483,7 @@ def run_qbx_skeletonization(ctx_factory,
 
         logger.info("id_eps %.5e rec error %.5e", id_eps, rec_errors[i])
 
-    if visualize:
+    if False and visualize:
         U, sigma, V = la.svd(info.error_mat)        # noqa: N806
 
         from arraycontext import thaw, unflatten
@@ -542,10 +542,11 @@ def run_qbx_skeletonization(ctx_factory,
     # proxy_radius_errors = np.empty((proxy_radius_eps.size, proxy_radius_factors.size))
 
     # for j in range(proxy_radius_factors.size):
-    #     places, proxy_indices = merge_proxies_into_collection(
+    #     pxy = make_proxies_for_collection(
     #             actx, places, mat_indices,
     #             approx_nproxy=estimate_nproxy,
     #             radius_factor=proxy_radius_factors[j],
+    #             dofdesc=target_dd,
     #             single_proxy_ball=single_proxy_ball,
     #             source_dd=source_dd, target_dd=target_dd, proxy_dd=proxy_dd)
 
@@ -553,7 +554,7 @@ def run_qbx_skeletonization(ctx_factory,
 
     #     for i in range(proxy_radius_eps.size):
     #         info = compute_target_reconstruction_error(
-    #                 actx, wrangler, places, mat_indices, proxy_indices,
+    #                 actx, wrangler, places, mat_indices, pxy,
     #                 source_dd=source_dd, target_dd=target_dd, proxy_dd=proxy_dd,
     #                 id_eps=proxy_radius_eps[i])
 
@@ -701,7 +702,7 @@ def plot_qbx_skeletonization(filename: str) -> None:
 
     # {{{ svd at lowest id_eps
 
-    if "error_mat" in r:
+    if "error_mat" in r and r["error_mat"].shape[0] < 1000:
         error_mat = r["error_mat"]
         u_mat, sigma, _ = la.svd(error_mat)
 

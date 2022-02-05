@@ -22,10 +22,13 @@ def estimate_proxies_from_id_eps(
     if ambient_dim == 2:
         eps = id_eps \
                 * (1.0 - rho) / (1.0 - alpha) \
-                * 2.0 / (2 + nsources) / np.sqrt(nsources)
+                * 1.0 / (2 + nsources) / np.sqrt(nsources)
 
         # NOTE: eps and rho are both < 1, so this should always be a positive number
-        p = int(np.log(eps) / np.log(rho) - 1) - qbx_order
+        p = int(np.log(eps) / np.log(rho) - 1)
+        if qbx_order > p:
+            p = qbx_order
+
         assert p > 0
 
         nproxy = min(2 * p, nsources)
