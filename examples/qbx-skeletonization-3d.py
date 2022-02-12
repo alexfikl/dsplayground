@@ -81,6 +81,45 @@ def compute_target_reconstruction_error(
 
 # {{{ set up
 
+def make_gmsh_sphere(order: int, cls: type):
+    from meshmode.mesh.io import ScriptSource
+    from meshmode.mesh import SimplexElementGroup, TensorProductElementGroup
+    if issubclass(cls, SimplexElementGroup):
+        script = ScriptSource(
+            """
+            Mesh.CharacteristicLengthMax = 0.05;
+            Mesh.HighOrderOptimize = 1;
+            Mesh.Algorithm = 1;
+
+            SetFactory("OpenCASCADE");
+            Sphere(1) = {0, 0, 0, 0.5};
+            """,
+            "geo")
+    elif issubclass(cls, TensorProductElementGroup):
+        script = ScriptSource(
+            """
+            Mesh.CharacteristicLengthMax = 0.05;
+            Mesh.HighOrderOptimize = 1;
+            Mesh.Algorithm = 6;
+
+            SetFactory("OpenCASCADE");
+            Sphere(1) = {0, 0, 0, 0.5};
+            Recombine Surface "*" = 0.0001;
+            """,
+            "geo")
+    else:
+        raise TypeError
+
+    from meshmode.mesh.io import generate_gmsh
+    return generate_gmsh(
+            script,
+            order=order,
+            dimensions=2,
+            force_ambient_dim=3,
+            target_unit="MM",
+            )
+
+
 def make_geometry_collection(
         actx, *,
         nelements: int,
@@ -88,15 +127,21 @@ def make_geometry_collection(
         source_ovsmp: int,
         qbx_order: int,
         source_name: str = "qbx",
+        mesh_name: str = "gmsh_sphere",
         ):
     import meshmode.mesh as mmesh
-    import meshmode.mesh.generation as mgen
-    mesh = mgen.generate_torus(1, 0.5,
-            n_major=nelements, n_minor=nelements // 2,
-            order=target_order,
-            group_cls=mmesh.SimplexElementGroup,
-            # group_cls=mmesh.TensorProductElementGroup,
-            )
+    if mesh_name == "torus":
+        import meshmode.mesh.generation as mgen
+        mesh = mgen.generate_torus(1, 0.5,
+                n_major=nelements, n_minor=nelements // 2,
+                order=target_order,
+                # group_cls=mmesh.SimplexElementGroup,
+                group_cls=mmesh.TensorProductElementGroup,
+                )
+    elif mesh_name == "gmsh_sphere":
+        mesh = make_gmsh_sphere(target_order, mmesh.SimplexElementGroup)
+    else:
+        raise ValueError(f"unknown mesh: '{mesh_name}'")
 
     from meshmode.discretization.poly_element import \
             InterpolatoryQuadratureGroupFactory
@@ -121,12 +166,21 @@ def make_block_indices(
         actx, density_discr, *,
         nblocks: int,
         itarget: Optional[int], jsource: Optional[int],
+        by_nodes: bool = True,
         ):
-    from pytential.linalg.proxy import partition_by_nodes
-    max_particles_in_box = density_discr.ndofs // nblocks
-    partition = partition_by_nodes(actx, density_discr,
-            max_particles_in_box=max_particles_in_box,
-            tree_kind="adaptive-level-restricted")
+    if by_nodes:
+        from pytential.linalg.proxy import partition_by_nodes
+        max_particles_in_box = density_discr.ndofs // nblocks
+        partition = partition_by_nodes(actx, density_discr,
+                max_particles_in_box=max_particles_in_box,
+                tree_kind="adaptive-level-restricted")
+    else:
+        from pytential.linalg.proxy import partition_by_elements
+        max_particles_in_box = density_discr.mesh.nelements // nblocks
+        partition = partition_by_elements(actx, density_discr,
+                max_particles_in_box=max_particles_in_box,
+                tree_kind="adaptive-level-restricted")
+
     logger.info("nblocks %5d got %5d", nblocks, partition.nblocks)
 
     import dsplayground as ds
@@ -226,35 +280,6 @@ def make_wrangler(places, *, target, source):
 
     return wrangler
 
-
-def simplex_mapping_singular_values(ambient_dim):
-    from pytential import sym
-    from pytential.symbolic.primitives import (
-            _equilateral_parametrization_derivative_matrix,
-            _small_mat_eigenvalues)
-
-    pder = _equilateral_parametrization_derivative_matrix(
-            ambient_dim, ambient_dim - 1)
-    form1 = sym.cse(pder.T @ pder)
-
-    return [
-            sym.cse(sym.sqrt(s), f"simplex_mapping_singval_{i}")
-            for i, s in enumerate(_small_mat_eigenvalues(4 * form1))
-            ]
-
-
-def hypercube_mapping_singular_values(ambient_dim):
-    from pytential import sym
-    from pytential.symbolic.primitives import _small_mat_eigenvalues
-
-    pder = sym.parametrization_derivative_matrix(ambient_dim, ambient_dim - 1)
-    form1 = sym.cse(pder.T @ pder)
-
-    return [
-            sym.cse(sym.sqrt(s), f"simplex_mapping_singval_{i}")
-            for i, s in enumerate(_small_mat_eigenvalues(4 * form1))
-            ]
-
 # }}}
 
 
@@ -279,7 +304,7 @@ def run_qbx_skeletonization(ctx_factory,
     ambient_dim = 3
 
     nelements = 24
-    target_order = 16
+    target_order = 8
     source_ovsmp = 1
     qbx_order = 4
 
@@ -288,7 +313,7 @@ def run_qbx_skeletonization(ctx_factory,
     single_proxy_ball = True
     double_proxy_factor = 0.8
 
-    basename = "qbx_skeletonization_{}d_{}".format(ambient_dim, "_".join([
+    basename = "qbx_skeletonization_{}d_{}_v15".format(ambient_dim, "_".join([
         str(v) for v in (
             "nelements", nelements,
             "order", target_order,
@@ -319,22 +344,24 @@ def run_qbx_skeletonization(ctx_factory,
     proxy_dd = source_dd.copy(geometry="proxy")
 
     if visualize:
-        from pytential import bind, sym
-        mapping_stretch_factors = simplex_mapping_singular_values
-        # mapping_stretch_factors = hypercube_mapping_singular_values
+        try:
+            from pytential.symbolic.primitives import _mapping_max_stretch_factor
+        except ImportError:
+            from pytential.symbolic.primitives import \
+                _simplex_mapping_max_stretch_factor as _mapping_max_stretch_factor
 
+        from pytential import bind, sym
         normals = bind(places,
                 sym.normal(places.ambient_dim).as_vector(),
                 auto_where=source_dd)(actx)
         stretches = bind(places,
-                mapping_stretch_factors(places.ambient_dim),
+                _mapping_max_stretch_factor(places.ambient_dim),
                 auto_where=source_dd)(actx)
 
         from meshmode.discretization.visualization import make_visualizer
         vis = make_visualizer(actx, density_discr, target_order, force_equidistant=True)
         vis.write_vtk_file(f"{basename}_geometry.vtu", [
-            ("stretch_0", stretches[0]),
-            ("stretch_1", stretches[1]),
+            ("stretch", stretches),
             ("normal", normals)
             ], overwrite=True, use_high_order=True)
 
@@ -483,7 +510,7 @@ def run_qbx_skeletonization(ctx_factory,
 
         logger.info("id_eps %.5e rec error %.5e", id_eps, rec_errors[i])
 
-    if False and visualize:
+    if visualize:
         U, sigma, V = la.svd(info.error_mat)        # noqa: N806
 
         from arraycontext import thaw, unflatten
@@ -702,12 +729,12 @@ def plot_qbx_skeletonization(filename: str) -> None:
 
     # {{{ svd at lowest id_eps
 
-    if "error_mat" in r and r["error_mat"].shape[0] < 1000:
+    if "error_mat" in r:
         error_mat = r["error_mat"]
         u_mat, sigma, _ = la.svd(error_mat)
 
         ax = fig.gca()
-        ax.semilogy(sigma, label=fr"$\sigma_{{max}} = {np.max(sigma):.5e}$")
+        ax.semilogy(abs(sigma), label=fr"$\sigma_{{max}} = {np.max(sigma):.5e}$")
         ax.set_xlabel("$Target$")
         ax.set_ylabel(r"$\sigma$")
         ax.legend()
