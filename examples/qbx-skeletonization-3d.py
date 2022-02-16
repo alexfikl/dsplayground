@@ -24,21 +24,34 @@ class ErrorInfo:
     error_mat: np.ndarray
 
 
+def rnorm(x, y, ord=None):
+    ynorm = la.norm(y, ord=ord)
+    if ynorm < 1.0e-15:
+        ynorm = 1
+
+    return la.norm(x - y, ord=ord) / ynorm
+
+
 def compute_target_reconstruction_error(
         actx, wrangler, places, mat_indices, pxy, *,
         source_dd, target_dd, proxy_dd, id_eps,
-        verbose=True):
+        ord=2, verbose=True):
     # {{{ evaluate matrices
+
+    from pytools import memoize_in
+
+    @memoize_in(mat_indices, (compute_target_reconstruction_error, "interaction"))
+    def _interaction_mat():
+        mat = wrangler._evaluate_nearfield(
+            actx, places, mat_indices,
+            ibrow=0, ibcol=0)
+        return mat.reshape(mat_indices.block_shape(0, 0))
 
     proxy_mat, pxyindices = wrangler.evaluate_target_farfield(
             actx, places, pxy, None,
             ibrow=0, ibcol=0)
     proxy_mat = proxy_mat.reshape(pxyindices.block_shape(0, 0))
-
-    interaction_mat = wrangler._evaluate_nearfield(
-            actx, places, mat_indices,
-            ibrow=0, ibcol=0)
-    interaction_mat = interaction_mat.reshape(mat_indices.block_shape(0, 0))
+    interaction_mat = _interaction_mat()
 
     # }}}
 
@@ -48,9 +61,9 @@ def compute_target_reconstruction_error(
     P = sli.reconstruct_interp_matrix(idx, proj).T      # noqa: N806
     idx = idx[:k]
 
-    id_error = la.norm(proxy_mat - P @ proxy_mat[idx, :]) / la.norm(proxy_mat)
+    id_error = rnorm(proxy_mat, P @ proxy_mat[idx, :], ord=ord)
     if verbose:
-        if proxy_mat.shape[0] < 1000:
+        if proxy_mat.shape[0] < 10000000:
             rank = la.matrix_rank(proxy_mat, tol=id_eps)
         else:
             rank = -1
@@ -66,7 +79,7 @@ def compute_target_reconstruction_error(
 
     rec_mat = P @ interaction_mat[idx, :]
     error_mat = interaction_mat - rec_mat
-    rec_error = la.norm(error_mat) / la.norm(interaction_mat)
+    rec_error = rnorm(rec_mat, interaction_mat, ord=ord)
 
     # }}}
 
@@ -288,6 +301,7 @@ def make_wrangler(places, *, target, source):
 def run_qbx_skeletonization(ctx_factory,
         itarget: Optional[int] = None,
         jsource: Optional[int] = None,
+        suffix: str = "v0",
         visualize: bool = False) -> None:
     import dsplayground as ds
     actx = ds.get_cl_array_context(ctx_factory)
@@ -308,12 +322,12 @@ def run_qbx_skeletonization(ctx_factory,
     source_ovsmp = 1
     qbx_order = 4
 
-    nblocks = 24
+    nblocks = 44
     proxy_radius_factor = 1.25
     single_proxy_ball = True
     double_proxy_factor = 0.8
 
-    basename = "qbx_skeletonization_{}d_{}_v15".format(ambient_dim, "_".join([
+    basename = "qbx_skeletonization_{}d_{}_{}".format(ambient_dim, suffix, "_".join([
         str(v) for v in (
             "nelements", nelements,
             "order", target_order,
@@ -444,7 +458,7 @@ def run_qbx_skeletonization(ctx_factory,
             max_target_radius, min_source_radius, proxy_radius,
             ntargets, nsources)
     if single_proxy_ball:
-        estimate_nproxy *= 2
+        estimate_nproxy *= 4
     logger.info("estimate_nproxy: %d", estimate_nproxy)
 
     pxy = make_proxies_for_collection(actx, places, mat_indices,
