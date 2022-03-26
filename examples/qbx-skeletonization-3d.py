@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class ErrorInfo:
     error: float
-    rank: int
+    id_rank: int
+    proxy_rank: int
     interaction_mat: np.ndarray
     rec_mat: np.ndarray
     error_mat: np.ndarray
@@ -30,6 +31,13 @@ def rnorm(x, y, ord=None):
         ynorm = 1
 
     return la.norm(x - y, ord=ord) / ynorm
+
+
+def interp_decomp_by_rrqr(mat, id_eps):
+    import scipy.linalg as sla
+    Q, R, permutation = sla.qr(mat, pivoting=True)
+    indices = np.diag(R) > id_eps
+
 
 
 def compute_target_reconstruction_error(
@@ -62,14 +70,11 @@ def compute_target_reconstruction_error(
     idx = idx[:k]
 
     id_error = rnorm(proxy_mat, P @ proxy_mat[idx, :], ord=ord)
-    if verbose:
-        if proxy_mat.shape[0] < 10000000:
-            rank = la.matrix_rank(proxy_mat, tol=id_eps)
-        else:
-            rank = -1
+    proxy_rank = la.matrix_rank(proxy_mat, tol=id_eps)
 
+    if verbose:
         logger.info("id_rank:   %3d num_rank %3d nproxy %4d",
-                idx.size, rank, proxy_mat.shape[1])
+                idx.size, proxy_rank, proxy_mat.shape[1])
         logger.info("id_error:  %.15e (eps %.5e)", id_error, id_eps)
         logger.info("\n")
 
@@ -84,7 +89,7 @@ def compute_target_reconstruction_error(
     # }}}
 
     return ErrorInfo(
-            error=rec_error, rank=k,
+            error=rec_error, id_rank=k, proxy_rank=proxy_rank,
             interaction_mat=interaction_mat,
             rec_mat=rec_mat,
             error_mat=error_mat)
@@ -100,18 +105,18 @@ def make_gmsh_sphere(order: int, cls: type):
     if issubclass(cls, SimplexElementGroup):
         script = ScriptSource(
             """
-            Mesh.CharacteristicLengthMax = 0.05;
+            Mesh.CharacteristicLengthMax = 0.4;
             Mesh.HighOrderOptimize = 1;
             Mesh.Algorithm = 1;
 
             SetFactory("OpenCASCADE");
-            Sphere(1) = {0, 0, 0, 0.5};
+            Sphere(1) = {0, 0, 0, 1.5};
             """,
             "geo")
     elif issubclass(cls, TensorProductElementGroup):
         script = ScriptSource(
             """
-            Mesh.CharacteristicLengthMax = 0.05;
+            Mesh.CharacteristicLengthMax = 0.1;
             Mesh.HighOrderOptimize = 1;
             Mesh.Algorithm = 6;
 
@@ -180,46 +185,114 @@ def make_block_indices(
         nblocks: int,
         itarget: Optional[int], jsource: Optional[int],
         by_nodes: bool = True,
+        basename: Optional[str] = None, visualize: bool = False,
         ):
     if by_nodes:
         from pytential.linalg.proxy import partition_by_nodes
         max_particles_in_box = density_discr.ndofs // nblocks
-        partition = partition_by_nodes(actx, density_discr,
-                max_particles_in_box=max_particles_in_box,
+        source_partition = partition_by_nodes(actx, density_discr,
+                max_particles_in_box=density_discr.ndofs // (64),
+                tree_kind="adaptive-level-restricted")
+        target_partition = partition_by_nodes(actx, density_discr,
+                max_particles_in_box=density_discr.ndofs // (48),
                 tree_kind="adaptive-level-restricted")
     else:
         from pytential.linalg.proxy import partition_by_elements
         max_particles_in_box = density_discr.mesh.nelements // nblocks
-        partition = partition_by_elements(actx, density_discr,
+        source_partition = partition_by_elements(actx, density_discr,
                 max_particles_in_box=max_particles_in_box,
                 tree_kind="adaptive-level-restricted")
 
-    logger.info("nblocks %5d got %5d", nblocks, partition.nblocks)
+    logger.info("nblocks %5d got source %5d target %5d", nblocks,
+                source_partition.nblocks, target_partition.nblocks)
 
     import dsplayground as ds
+
+    def get_center(partition, idx):
+        nodes = ds.get_discr_nodes(density_discr)
+        nodes = partition.block_take(nodes.T, idx).T
+        return np.mean(nodes, axis=1)
+
     if itarget is None and jsource is None:
         itarget = 0
         jsource = ds.find_farthest_apart_block(
-                actx, density_discr, partition, itarget)
+            actx, density_discr, source_partition,
+            target_center=get_center(target_partition, itarget))
     elif itarget is None and jsource is not None:
         itarget = ds.find_farthest_apart_block(
-                actx, density_discr, partition, jsource)
+            actx, density_discr, target_partition,
+            target_center=get_center(source_partition, jsource))
     elif itarget is not None and jsource is None:
         jsource = ds.find_farthest_apart_block(
-                actx, density_discr, partition, itarget)
+            actx, density_discr, source_partition,
+            target_center=get_center(target_partition, itarget))
     else:
-        assert itarget is not None and 0 <= itarget < partition.nblocks
-        assert jsource is not None and 0 <= jsource < partition.nblocks
+        assert itarget is not None and 0 <= itarget < target_partition.nblocks
+        assert jsource is not None and 0 <= jsource < source_partition.nblocks
+
+    if visualize:
+        target_block_sizes = np.array([
+            target_partition.block_size(i) for i in range(target_partition.nblocks)
+        ])
+        logger.info("block sizes: %s", list(target_block_sizes))
+        source_block_sizes = np.array([
+            source_partition.block_size(i) for i in range(source_partition.nblocks)
+        ])
+        logger.info("block sizes: %s", list(source_block_sizes))
+
+        fig = mp.figure()
+        ax = fig.gca()
+
+        ax.plot(target_block_sizes, "o-")
+        ax.plot(source_block_sizes, "o-")
+        ax.plot(itarget, target_block_sizes[itarget], "o", label="$Target$")
+        ax.plot(jsource, source_block_sizes[jsource], "o", label="$Source$")
+        ax.axhline(int(np.mean(target_block_sizes)), ls="--", color="k")
+        ax.axhline(int(np.mean(source_block_sizes)), ls=":", color="k")
+
+        ax.set_xlabel("$block$")
+        ax.set_ylabel(r"$\#points$")
+
+        fig.savefig(f"{basename}_block_sizes")
+        mp.close(fig)
 
     from pytential.linalg.utils import make_block_index_from_array
     source_indices = make_block_index_from_array(
-            [partition.block_indices(jsource)])
+            [source_partition.block_indices(jsource)])
     target_indices = make_block_index_from_array(
-            [partition.block_indices(itarget)])
+            [target_partition.block_indices(itarget)])
 
     from pytential.linalg.utils import MatrixBlockIndexRanges
     return MatrixBlockIndexRanges(target_indices, source_indices), \
-            partition, itarget, jsource
+            (target_partition, itarget), \
+            (source_partition, jsource)
+
+
+def make_block_indices_single(
+        actx, density_discr, *,
+        source_size: int, target_size: int,
+        itarget: Optional[int], jsource: Optional[int]):
+    import dsplayground as ds
+    nodes = ds.get_discr_nodes(density_discr)
+
+    # get centers
+    if itarget is None:
+        itarget = 0
+    target_center = nodes[:, itarget]
+
+    if jsource is None:
+        jsource = ds.find_farthest_apart_node(nodes, target_center)
+    source_center = nodes[:, jsource]
+
+    # get indices
+    from pytential.linalg.utils import make_block_index_from_array
+    source_indices = make_block_index_from_array(
+        [ds.find_nodes_around_center(nodes, source_center, source_size)])
+    target_indices = make_block_index_from_array(
+        [ds.find_nodes_around_center(nodes, target_center, target_size)])
+
+    from pytential.linalg.utils import MatrixBlockIndexRanges
+    return MatrixBlockIndexRanges(target_indices, source_indices), itarget, jsource
 
 
 def make_proxies_for_collection(actx, places, mat_indices, *,
@@ -227,7 +300,7 @@ def make_proxies_for_collection(actx, places, mat_indices, *,
         radius_factor: float,
         dofdesc: Any,
         single_proxy_ball: bool,
-        double_proxy_factor: float = 0.8,
+        double_proxy_factor: float = 1.25,
         ):
     import dsplayground as ds
 
@@ -237,7 +310,7 @@ def make_proxies_for_collection(actx, places, mat_indices, *,
         if single:
             return ds.make_sphere(n, method=method)
         else:
-            assert radius_factor >= 1
+            assert double_proxy_factor >= 1
             return np.hstack([
                 ds.make_sphere(n, method=method),
                 double_proxy_factor * ds.make_sphere(n, method=method)
@@ -315,17 +388,38 @@ def run_qbx_skeletonization(ctx_factory,
     #   nelements = 24, target_order = 16, qbx_order = 4,
     #   proxy_radius_factor = 1.5
 
+    # Parameters that fix the plateau
+    #   - increasing qbx_order
+    #   - increasing nblocks -> decreasing size of block to skeletonize; either
+    #   decreasing the number of source or the number of targets seems to work,
+    #   which is a bit weird?
+    #
+    # Parameters that seem to have no effect
+    #   - target_order: tried [4, 8]
+    #   - proxy_radius_factor: tried [1.1, 1.25, 1.5]
+    #   - single / double proxy balls; regardless of double_proxy_factor
+    #
+    # NOTE: The fact that proxy_radius_factor has no effect indicates that
+    # the plateau is not due to the local-to-local translation.
+    #
+    # Parameters that make it worse:
+    #   - Using a FarFieldBlockBuilder for the proxy interactions instead of
+    #   NearFieldBlockBuilder: this loses about 1-2 orders of magnitude in the
+    #   plateau
+    #
     ambient_dim = 3
 
     nelements = 24
     target_order = 8
     source_ovsmp = 1
-    qbx_order = 4
+    qbx_order = 0
 
-    nblocks = 44
+    nblocks = 48
+    source_size = 900
+    target_size = 900
     proxy_radius_factor = 1.25
     single_proxy_ball = True
-    double_proxy_factor = 0.8
+    double_proxy_factor = 1.25
 
     basename = "qbx_skeletonization_{}d_{}_{}".format(ambient_dim, suffix, "_".join([
         str(v) for v in (
@@ -383,29 +477,14 @@ def run_qbx_skeletonization(ctx_factory,
 
     # {{{ set up indices
 
-    mat_indices, partition, itarget, jsource = make_block_indices(
+    # mat_indices, itarget, jsource = make_block_indices(
+    #         actx, density_discr,
+    #         nblocks=nblocks,
+    #         itarget=itarget, jsource=jsource)
+    mat_indices, itarget, jsource = make_block_indices_single(
             actx, density_discr,
-            nblocks=nblocks,
+            source_size=source_size, target_size=target_size,
             itarget=itarget, jsource=jsource)
-    nblocks = partition.nblocks
-
-    if visualize:
-        block_sizes = np.array([partition.block_size(i) for i in range(nblocks)])
-        logger.info("block sizes: %s", list(block_sizes))
-
-        fig = mp.figure()
-        ax = fig.gca()
-
-        ax.plot(block_sizes, "o-")
-        ax.plot(itarget, block_sizes[itarget], "o", label="$Target$")
-        ax.plot(jsource, block_sizes[jsource], "o", label="$Source$")
-        ax.axhline(int(np.mean(block_sizes)), ls="--", color="k")
-
-        ax.set_xlabel("$block$")
-        ax.set_ylabel(r"$\#points$")
-
-        fig.savefig(f"{basename}_block_sizes")
-        mp.close(fig)
 
     if visualize:
         marker = np.zeros(density_discr.ndofs)
@@ -450,15 +529,25 @@ def run_qbx_skeletonization(ctx_factory,
             max_target_radius, min_source_radius,
             max_target_radius / min_source_radius)
 
+    from arraycontext import flatten
+    expansion_radii = bind(places,
+                           sym.expansion_radii(ambient_dim),
+                           auto_where=target_dd)(actx)
+    expansion_radii = mat_indices.row.block_take(
+        actx.to_numpy(flatten(expansion_radii, actx)), 0
+    )
+    max_expansion_radius = np.max(expansion_radii)
+    logger.info("max_expansion_radius %.5e", max_expansion_radius)
+
     # }}}
 
     # {{{ set up proxies
 
     estimate_nproxy = ds.estimate_proxies_from_id_eps(ambient_dim, 1.0e-16,
             max_target_radius, min_source_radius, proxy_radius,
-            ntargets, nsources)
+            ntargets, nsources) + 512
     if single_proxy_ball:
-        estimate_nproxy *= 4
+        estimate_nproxy *= 2
     logger.info("estimate_nproxy: %d", estimate_nproxy)
 
     pxy = make_proxies_for_collection(actx, places, mat_indices,
@@ -491,28 +580,32 @@ def run_qbx_skeletonization(ctx_factory,
     # {{{ errors
 
     # NOTE: everything in here is going to go into an `npz` file for storage
-    cache = dict(
-            # parameters
-            ambient_dim=ambient_dim,
-            nelements=nelements,
-            target_order=target_order,
-            source_ovsmp=source_ovsmp,
-            qbx_order=qbx_order,
-            # skeletonization
-            nblocks=nblocks,
-            proxy_radius_factory=proxy_radius_factor,
-            ntargets=ntargets, itarget=itarget,
-            nsources=nsources, jsource=jsource,
-            target_center=target_center, target_radius=target_radius,
-            source_center=source_center, source_radius=source_radius,
-            proxy_radius=proxy_radius,
-            )
+    cache = {
+        # parameters
+        "ambient_dim": ambient_dim,
+        "nelements": nelements,
+        "target_order": target_order,
+        "source_ovsmp": source_ovsmp,
+        "qbx_order": qbx_order,
+        # skeletonization
+        "nblocks": nblocks,
+        "proxy_radius_factory": proxy_radius_factor,
+        "ntargets": ntargets, "itarget": itarget,
+        "nsources": nsources, "jsource": jsource,
+        "target_center": target_center, "target_radius": target_radius,
+        "source_center": source_center, "source_radius": source_radius,
+        "proxy_radius": proxy_radius,
+        "min_source_radius": min_source_radius,
+        "max_expansion_radius": max_expansion_radius,
+    }
 
     # {{{ error vs. id_eps
 
     id_eps_array = 10.0**(-np.arange(2, 16))
     # id_eps_array = 10.0**(-np.array([12]))
     rec_errors = np.empty((id_eps_array.size,))
+    id_rank = np.empty(id_eps_array.size, dtype=np.int64)
+    pxy_rank = np.empty(id_eps_array.size, dtype=np.int64)
 
     for i, id_eps in enumerate(id_eps_array):
         info = compute_target_reconstruction_error(
@@ -521,8 +614,15 @@ def run_qbx_skeletonization(ctx_factory,
                 id_eps=id_eps,
                 )
         rec_errors[i] = info.error
+        id_rank[i] = info.id_rank
+        pxy_rank[i] = info.proxy_rank
 
-        logger.info("id_eps %.5e rec error %.5e", id_eps, rec_errors[i])
+        rho = proxy_radius / min_source_radius
+        c = np.prod(info.interaction_mat.shape) / (4.0 * np.pi)
+
+        logger.info("id_eps %.5e rec error %.5e estimate %.5e",
+                    id_eps, rec_errors[i],
+                    1.0e-5 * c * rho ** np.sqrt(id_rank[i]))
 
     if visualize:
         U, sigma, V = la.svd(info.error_mat)        # noqa: N806
@@ -565,8 +665,10 @@ def run_qbx_skeletonization(ctx_factory,
                 names_and_fields, overwrite=True)
 
     cache.update({
+        "estimate_nproxy": pxy.points.shape[1],
         "id_eps": id_eps_array,
         "rec_errors": rec_errors,
+        "id_rank": id_rank, "proxy_rank": pxy_rank,
         "interaction_mat": info.interaction_mat,
         "error_mat": info.error_mat,
         })
@@ -729,9 +831,13 @@ def plot_qbx_skeletonization(filename: str) -> None:
         id_eps = r["id_eps"]
         rec_errors = r["rec_errors"]
 
-        ax = fig.gca()
+        # rho = r["proxy_radius"] / r["min_source_radius"]
+        # c = 1.0e-5 * np.prod(r["interaction_mat"].shape) / (4.0 * np.pi)
+        # translation_model_error = c * rho ** np.sqrt(r["id_rank"])
 
+        ax = fig.gca()
         ax.loglog(id_eps, rec_errors, "o-")
+        # ax.loglog(id_eps, translation_model_error, "o-")
         ax.loglog(id_eps, id_eps, "k--")
         ax.set_xlabel(r"$\epsilon_{id}$")
         ax.set_ylabel(r"$Relative~Error$")
@@ -789,6 +895,27 @@ def plot_qbx_skeletonization(filename: str) -> None:
 
     # }}}
 
+    # {{{ rank
+
+    if "id_rank" in r:
+        nproxies = r["estimate_nproxy"]
+        id_rank = r["id_rank"]
+        proxy_rank = r["proxy_rank"]
+
+        ax = fig.gca()
+
+        ax.semilogx(id_eps, id_rank, label="$ID$")
+        ax.semilogx(id_eps, proxy_rank, label="$Numerical$")
+        ax.axhline(nproxies, ls="--", color="k")
+        ax.set_xlabel(r"$\epsilon$")
+        ax.set_ylabel("$Rank$")
+        ax.legend()
+
+        fig.savefig(f"{basename}_rank")
+        fig.clf()
+
+    # }}}
+
     # {{{ convergence vs model
 
     if "nproxy_empirical" in r:
@@ -798,7 +925,6 @@ def plot_qbx_skeletonization(filename: str) -> None:
         ax = fig.gca()
 
         ax.semilogx(id_eps, nproxy_empirical, "o-", label="$Empirical$")
-        # ax.semilogx(id_eps_array, id_rank, "o-", label="$Rank$")
         ax.semilogx(id_eps, nproxy_model, "ko-", label="$Model$")
         ax.set_xlabel(r"$\epsilon$")
         ax.set_ylabel(r"$\#~proxy$")

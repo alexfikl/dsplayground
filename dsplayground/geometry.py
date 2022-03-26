@@ -176,16 +176,38 @@ def get_point_radius_and_center(points: np.ndarray) -> Tuple[float, np.ndarray]:
 
 # {{{ find_farthest_apart_block
 
+def find_farthest_apart_node(nodes: np.ndarray, center: np.ndarray) -> np.ndarray:
+    dists = la.norm(nodes - center.reshape(-1, 1), axis=0)
+    return np.argmax(dists)
+
+
+def find_nodes_around_center(
+        nodes: np.ndarray, center: np.ndarray, nnodes: int) -> np.ndarray:
+    dists = la.norm(nodes - center.reshape(-1, 1), axis=0)
+
+    radius = 1.0e-2
+    while True:
+        indices = np.where(dists < radius)[0]
+        if indices.size >= nnodes:
+            break
+
+        radius = 1.25 * radius
+
+    return indices
+
+
 def find_farthest_apart_block(
         actx: ArrayContext,
         discr: Discretization,
         indices: BlockIndexRanges,
-        itarget: int) -> int:
+        itarget: Optional[int] = None,
+        target_center: Optional[np.ndarray] = None) -> int:
     nodes = get_discr_nodes(discr)
-    target_nodes = indices.block_take(nodes.T, itarget).T
-    target_center = np.mean(target_nodes, axis=1)
+    if target_center is None:
+        target_nodes = indices.block_take(nodes.T, itarget).T
+        target_center = np.mean(target_nodes, axis=1)
 
-    max_index = itarget
+    max_index = None
     max_dists = -np.inf
 
     for jsource in range(indices.nblocks):

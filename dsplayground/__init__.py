@@ -6,6 +6,8 @@ from dsplayground.geometry import (
 
     get_point_radius_and_center,
     get_discr_nodes,
+    find_farthest_apart_node,
+    find_nodes_around_center,
     find_farthest_apart_block,
 )
 from dsplayground.evaluation import (
@@ -24,6 +26,8 @@ __all__ = (
     "as_source", "as_target", "affine_map",
     "get_point_radius_and_center",
     "get_discr_nodes",
+    "find_farthest_apart_node",
+    "find_nodes_around_center",
     "find_farthest_apart_block",
 
     "get_cl_array_context",
