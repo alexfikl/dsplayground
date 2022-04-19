@@ -33,11 +33,35 @@ def rnorm(x, y, ord=None):
     return la.norm(x - y, ord=ord) / ynorm
 
 
-def interp_decomp_by_rrqr(mat, id_eps):
-    import scipy.linalg as sla
-    Q, R, permutation = sla.qr(mat, pivoting=True)
-    indices = np.diag(R) > id_eps
+def qbx_interaction_mat(
+        actx, places, *,
+        qbx_order: int,
+        source: str, target: str,
+        ):
+    source_discr = places.get_discretization(source)
+    target_discr = places.get_discretization(target)
 
+    from sumpy.kernel import LaplaceKernel
+    kernel = LaplaceKernel(places.ambient_dim)
+
+    from sumpy.expansion.local import LineTaylorLocalExpansion
+    expansion = LineTaylorLocalExpansion(kernel, qbx_order)
+
+    from sumpy.qbx import LayerPotentialMatrixGenerator
+    gen = LayerPotentialMatrixGenerator(actx.context,
+                                        expansion=expansion,
+                                        source_kernels=(kernel,),
+                                        target_kernels=(kernel,))
+
+    _, (mat,) = gen(actx.queue,
+                    targets=target_discr.nodes(),
+                    sources=source_discr.nodes(),
+                    centers=target_discr.expansion_centers(+1),
+                    expansion_radii=target_discr.expansion_radii())
+
+    mat = actx.to_numpy(mat)
+
+    return mat
 
 
 def compute_target_reconstruction_error(
@@ -60,6 +84,8 @@ def compute_target_reconstruction_error(
             ibrow=0, ibcol=0)
     proxy_mat = proxy_mat.reshape(pxyindices.block_shape(0, 0))
     interaction_mat = _interaction_mat()
+
+    logger.info("%.12e %.12e", la.norm(interaction_mat), la.norm(proxy_mat))
 
     # }}}
 
@@ -274,11 +300,13 @@ def make_block_indices_single(
         itarget: Optional[int], jsource: Optional[int]):
     import dsplayground as ds
     nodes = ds.get_discr_nodes(density_discr)
+    logger.info("%.12e", la.norm(nodes))
 
     # get centers
     if itarget is None:
         itarget = 0
     target_center = nodes[:, itarget]
+    print(target_center)
 
     if jsource is None:
         jsource = ds.find_farthest_apart_node(nodes, target_center)
@@ -320,6 +348,7 @@ def make_proxies_for_collection(actx, places, mat_indices, *,
     proxy = ProxyGenerator(places,
             approx_nproxy=approx_nproxy,
             radius_factor=radius_factor,
+            norm_type="l2",
             _generate_ref_proxies=partial(make_proxies, single=single_proxy_ball),
             )
 
@@ -412,7 +441,7 @@ def run_qbx_skeletonization(ctx_factory,
     nelements = 24
     target_order = 8
     source_ovsmp = 1
-    qbx_order = 0
+    qbx_order = 4
 
     nblocks = 48
     source_size = 900
@@ -516,18 +545,10 @@ def run_qbx_skeletonization(ctx_factory,
     target_radius, target_center = ds.get_point_radius_and_center(target_nodes)
     logger.info("targets: radius %.5e center %s", target_radius, target_center)
 
-    proxy_radius = proxy_radius_factor * target_radius
-    logger.info("proxy:   radius %.5e", proxy_radius)
-
     max_target_radius = target_radius
     min_source_radius = np.min(
             la.norm(source_nodes - target_center.reshape(-1, 1), axis=0)
             )
-    # NOTE: only count the sources outside the proxy ball
-    min_source_radius = max(proxy_radius, min_source_radius)
-    logger.info("max_target_radius %.5e min_source_radius %.5e rho %.5e",
-            max_target_radius, min_source_radius,
-            max_target_radius / min_source_radius)
 
     from arraycontext import flatten
     expansion_radii = bind(places,
@@ -539,6 +560,15 @@ def run_qbx_skeletonization(ctx_factory,
     max_expansion_radius = np.max(expansion_radii)
     logger.info("max_expansion_radius %.5e", max_expansion_radius)
 
+    proxy_radius = proxy_radius_factor * (max_target_radius + max_expansion_radius)
+    logger.info("proxy:   radius %.5e", proxy_radius)
+
+    # NOTE: only count the sources outside the proxy ball
+    min_source_radius = max(proxy_radius, min_source_radius)
+    logger.info("max_target_radius %.5e min_source_radius %.5e rho %.5e",
+            max_target_radius, min_source_radius,
+            max_target_radius / min_source_radius)
+
     # }}}
 
     # {{{ set up proxies
@@ -548,15 +578,18 @@ def run_qbx_skeletonization(ctx_factory,
             ntargets, nsources) + 512
     if single_proxy_ball:
         estimate_nproxy *= 2
-    logger.info("estimate_nproxy: %d", estimate_nproxy)
 
     pxy = make_proxies_for_collection(actx, places, mat_indices,
-            approx_nproxy=estimate_nproxy,
+            approx_nproxy=1024,
             radius_factor=proxy_radius_factor,
             dofdesc=target_dd,
             single_proxy_ball=single_proxy_ball,
             double_proxy_factor=double_proxy_factor,
             )
+    proxy_radius = actx.to_numpy(pxy.radii)[0]
+
+    logger.info("estimate_nproxy: %d nproxies %d",
+                estimate_nproxy, pxy.points.shape[-1])
 
     wrangler = make_wrangler(places, target=target_dd, source=source_dd)
 
