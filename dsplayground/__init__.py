@@ -8,7 +8,7 @@ from dsplayground.geometry import (
     get_discr_nodes,
     find_farthest_apart_node,
     find_nodes_around_center,
-    find_farthest_apart_block,
+    find_farthest_apart_cluster,
 )
 from dsplayground.evaluation import (
     evaluate_p2p, evaluate_qbx,
@@ -28,7 +28,7 @@ __all__ = (
     "get_discr_nodes",
     "find_farthest_apart_node",
     "find_nodes_around_center",
-    "find_farthest_apart_block",
+    "find_farthest_apart_cluster",
 
     "get_cl_array_context",
 

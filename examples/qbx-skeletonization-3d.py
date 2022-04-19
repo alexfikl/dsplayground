@@ -25,7 +25,7 @@ class ErrorInfo:
     error_mat: np.ndarray
 
 
-def rnorm(x, y, ord=None):
+def rnorm(x, y, ord=None):          # pylint: disable=redefined-builtin
     ynorm = la.norm(y, ord=ord)
     if ynorm < 1.0e-15:
         ynorm = 1
@@ -67,22 +67,27 @@ def qbx_interaction_mat(
 def compute_target_reconstruction_error(
         actx, wrangler, places, mat_indices, pxy, *,
         source_dd, target_dd, proxy_dd, id_eps,
-        ord=2, verbose=True):
+        ord=2, verbose=True):           # pylint: disable=redefined-builtin
     # {{{ evaluate matrices
 
     from pytools import memoize_in
 
     @memoize_in(mat_indices, (compute_target_reconstruction_error, "interaction"))
     def _interaction_mat():
-        mat = wrangler._evaluate_nearfield(
-            actx, places, mat_indices,
-            ibrow=0, ibcol=0)
-        return mat.reshape(mat_indices.block_shape(0, 0))
+        mat = wrangler._evaluate_expr(      # pylint: disable=protected-access
+            actx, places,
+            wrangler.neighbor_cluster_builder,
+            mat_indices,
+            wrangler.exprs[0],
+            idomain=0,
+            _weighted=wrangler.weighted_targets,
+            )
+        return mat.reshape(mat_indices.cluster_shape(0, 0))
 
     proxy_mat, pxyindices = wrangler.evaluate_target_farfield(
             actx, places, pxy, None,
             ibrow=0, ibcol=0)
-    proxy_mat = proxy_mat.reshape(pxyindices.block_shape(0, 0))
+    proxy_mat = proxy_mat.reshape(pxyindices.cluster_shape(0, 0))
     interaction_mat = _interaction_mat()
 
     logger.info("%.12e %.12e", la.norm(interaction_mat), la.norm(proxy_mat))
@@ -206,95 +211,84 @@ def make_geometry_collection(
     return places
 
 
-def make_block_indices(
+def make_cluster_indices(
         actx, density_discr, *,
-        nblocks: int,
+        nclusters: int,
         itarget: Optional[int], jsource: Optional[int],
-        by_nodes: bool = True,
         basename: Optional[str] = None, visualize: bool = False,
         ):
-    if by_nodes:
-        from pytential.linalg.proxy import partition_by_nodes
-        max_particles_in_box = density_discr.ndofs // nblocks
-        source_partition = partition_by_nodes(actx, density_discr,
-                max_particles_in_box=density_discr.ndofs // (64),
-                tree_kind="adaptive-level-restricted")
-        target_partition = partition_by_nodes(actx, density_discr,
-                max_particles_in_box=density_discr.ndofs // (48),
-                tree_kind="adaptive-level-restricted")
-    else:
-        from pytential.linalg.proxy import partition_by_elements
-        max_particles_in_box = density_discr.mesh.nelements // nblocks
-        source_partition = partition_by_elements(actx, density_discr,
-                max_particles_in_box=max_particles_in_box,
-                tree_kind="adaptive-level-restricted")
+    from pytential.linalg.proxy import partition_by_nodes
+    source_partition = partition_by_nodes(actx, density_discr,
+            max_particles_in_box=density_discr.ndofs // (64),
+            tree_kind="adaptive-level-restricted")
+    target_partition = partition_by_nodes(actx, density_discr,
+            max_particles_in_box=density_discr.ndofs // (48),
+            tree_kind="adaptive-level-restricted")
 
-    logger.info("nblocks %5d got source %5d target %5d", nblocks,
-                source_partition.nblocks, target_partition.nblocks)
+    logger.info("nclusters %5d got source %5d target %5d", nclusters,
+                source_partition.nclusters, target_partition.nclusters)
 
     import dsplayground as ds
 
     def get_center(partition, idx):
         nodes = ds.get_discr_nodes(density_discr)
-        nodes = partition.block_take(nodes.T, idx).T
+        nodes = partition.cluster_take(nodes.T, idx).T
         return np.mean(nodes, axis=1)
 
     if itarget is None and jsource is None:
         itarget = 0
-        jsource = ds.find_farthest_apart_block(
+        jsource = ds.find_farthest_apart_cluster(
             actx, density_discr, source_partition,
             target_center=get_center(target_partition, itarget))
     elif itarget is None and jsource is not None:
-        itarget = ds.find_farthest_apart_block(
+        itarget = ds.find_farthest_apart_cluster(
             actx, density_discr, target_partition,
             target_center=get_center(source_partition, jsource))
     elif itarget is not None and jsource is None:
-        jsource = ds.find_farthest_apart_block(
+        jsource = ds.find_farthest_apart_cluster(
             actx, density_discr, source_partition,
             target_center=get_center(target_partition, itarget))
     else:
-        assert itarget is not None and 0 <= itarget < target_partition.nblocks
-        assert jsource is not None and 0 <= jsource < source_partition.nblocks
+        assert itarget is not None and 0 <= itarget < target_partition.nclusters
+        assert jsource is not None and 0 <= jsource < source_partition.nclusters
 
     if visualize:
-        target_block_sizes = np.array([
-            target_partition.block_size(i) for i in range(target_partition.nblocks)
+        target_cluster_sizes = np.array([
+            target_partition.cluster_size(i) for i in range(target_partition.nclusters)
         ])
-        logger.info("block sizes: %s", list(target_block_sizes))
-        source_block_sizes = np.array([
-            source_partition.block_size(i) for i in range(source_partition.nblocks)
+        logger.info("block sizes: %s", list(target_cluster_sizes))
+        source_cluster_sizes = np.array([
+            source_partition.cluster_size(i) for i in range(source_partition.nclusters)
         ])
-        logger.info("block sizes: %s", list(source_block_sizes))
+        logger.info("block sizes: %s", list(source_cluster_sizes))
 
         fig = mp.figure()
         ax = fig.gca()
 
-        ax.plot(target_block_sizes, "o-")
-        ax.plot(source_block_sizes, "o-")
-        ax.plot(itarget, target_block_sizes[itarget], "o", label="$Target$")
-        ax.plot(jsource, source_block_sizes[jsource], "o", label="$Source$")
-        ax.axhline(int(np.mean(target_block_sizes)), ls="--", color="k")
-        ax.axhline(int(np.mean(source_block_sizes)), ls=":", color="k")
+        ax.plot(target_cluster_sizes, "o-")
+        ax.plot(source_cluster_sizes, "o-")
+        ax.plot(itarget, target_cluster_sizes[itarget], "o", label="$Target$")
+        ax.plot(jsource, source_cluster_sizes[jsource], "o", label="$Source$")
+        ax.axhline(int(np.mean(target_cluster_sizes)), ls="--", color="k")
+        ax.axhline(int(np.mean(source_cluster_sizes)), ls=":", color="k")
 
         ax.set_xlabel("$block$")
         ax.set_ylabel(r"$\#points$")
 
-        fig.savefig(f"{basename}_block_sizes")
+        fig.savefig(f"{basename}_cluster_sizes")
         mp.close(fig)
 
-    from pytential.linalg.utils import make_block_index_from_array
-    source_indices = make_block_index_from_array(
-            [source_partition.block_indices(jsource)])
-    target_indices = make_block_index_from_array(
-            [target_partition.block_indices(itarget)])
+    from pytential.linalg.utils import make_index_list
+    source_indices = make_index_list([source_partition.cluster_indices(jsource)])
+    target_indices = make_index_list([target_partition.cluster_indices(itarget)])
 
-    from pytential.linalg.utils import MatrixBlockIndexRanges
-    return MatrixBlockIndexRanges(target_indices, source_indices), \
+    from pytential.linalg.utils import TargetAndSourceClusterList
+    return TargetAndSourceClusterList(target_indices, source_indices), \
             (target_partition, itarget), \
             (source_partition, jsource)
 
 
-def make_block_indices_single(
+def make_cluster_indices_single(
         actx, density_discr, *,
         source_size: int, target_size: int,
         itarget: Optional[int], jsource: Optional[int]):
@@ -313,14 +307,14 @@ def make_block_indices_single(
     source_center = nodes[:, jsource]
 
     # get indices
-    from pytential.linalg.utils import make_block_index_from_array
-    source_indices = make_block_index_from_array(
+    from pytential.linalg.utils import make_index_list
+    source_indices = make_index_list(
         [ds.find_nodes_around_center(nodes, source_center, source_size)])
-    target_indices = make_block_index_from_array(
+    target_indices = make_index_list(
         [ds.find_nodes_around_center(nodes, target_center, target_size)])
 
-    from pytential.linalg.utils import MatrixBlockIndexRanges
-    return MatrixBlockIndexRanges(target_indices, source_indices), itarget, jsource
+    from pytential.linalg.utils import TargetAndSourceClusterList
+    return TargetAndSourceClusterList(target_indices, source_indices), itarget, jsource
 
 
 def make_proxies_for_collection(actx, places, mat_indices, *,
@@ -352,27 +346,28 @@ def make_proxies_for_collection(actx, places, mat_indices, *,
             _generate_ref_proxies=partial(make_proxies, single=single_proxy_ball),
             )
 
-    return proxy(actx, dofdesc, mat_indices.row)
+    return proxy(actx, dofdesc, mat_indices.targets)
 
 
 def make_wrangler(places, *, target, source):
-    from pytential.symbolic.matrix import FarFieldBlockBuilder, NearFieldBlockBuilder
+    from pytential.symbolic.matrix import (
+            P2PClusterMatrixBuilder, QBXClusterMatrixBuilder)
 
-    def UnweightedFarFieldBlockBuilder(*args, **kwargs):      # noqa: N802
+    def UnweightedP2PClusterMatrixBuilder(*args, **kwargs):      # noqa: N802
         kwargs["_weighted"] = False
-        return FarFieldBlockBuilder(*args, **kwargs)
+        return P2PClusterMatrixBuilder(*args, **kwargs)
 
-    def WeightedFarFieldBlockBuilder(*args, **kwargs):      # noqa: N802
+    def WeightedP2PClusterMatrixBuilder(*args, **kwargs):      # noqa: N802
         kwargs["_weighted"] = True
-        return FarFieldBlockBuilder(*args, **kwargs)
+        return P2PClusterMatrixBuilder(*args, **kwargs)
 
-    def UnweightedNearFieldBlockBuilder(*args, **kwargs):   # noqa: N802
+    def UnweightedQBXClusterMatrixBuilder(*args, **kwargs):   # noqa: N802
         kwargs["_weighted"] = False
-        return NearFieldBlockBuilder(*args, **kwargs)
+        return QBXClusterMatrixBuilder(*args, **kwargs)
 
-    def WeightedNearFieldBlockBuilder(*args, **kwargs):     # noqa: N802
+    def WeightedQBXClusterMatrixBuilder(*args, **kwargs):     # noqa: N802
         kwargs["_weighted"] = True
-        return NearFieldBlockBuilder(*args, **kwargs)
+        return QBXClusterMatrixBuilder(*args, **kwargs)
 
     from sumpy.kernel import LaplaceKernel
     kernel = LaplaceKernel(places.ambient_dim)
@@ -388,10 +383,10 @@ def make_wrangler(places, *, target, source):
             places, sym_op, sym_sigma,
             domains=[source],
             context={},
-            _weighted_farfield=(False, False),
-            _source_farfield_block_builder=UnweightedFarFieldBlockBuilder,
-            _target_farfield_block_builder=UnweightedNearFieldBlockBuilder,
-            _nearfield_block_builder=UnweightedNearFieldBlockBuilder)
+            _weighted_proxy=(False, False),
+            _proxy_source_cluster_builder=UnweightedP2PClusterMatrixBuilder,
+            _proxy_target_cluster_builder=UnweightedQBXClusterMatrixBuilder,
+            _neighbor_cluster_builder=UnweightedQBXClusterMatrixBuilder)
 
     return wrangler
 
@@ -413,29 +408,6 @@ def run_qbx_skeletonization(ctx_factory,
 
     # {{{ parameters
 
-    # This case seems to bottom out::
-    #   nelements = 24, target_order = 16, qbx_order = 4,
-    #   proxy_radius_factor = 1.5
-
-    # Parameters that fix the plateau
-    #   - increasing qbx_order
-    #   - increasing nblocks -> decreasing size of block to skeletonize; either
-    #   decreasing the number of source or the number of targets seems to work,
-    #   which is a bit weird?
-    #
-    # Parameters that seem to have no effect
-    #   - target_order: tried [4, 8]
-    #   - proxy_radius_factor: tried [1.1, 1.25, 1.5]
-    #   - single / double proxy balls; regardless of double_proxy_factor
-    #
-    # NOTE: The fact that proxy_radius_factor has no effect indicates that
-    # the plateau is not due to the local-to-local translation.
-    #
-    # Parameters that make it worse:
-    #   - Using a FarFieldBlockBuilder for the proxy interactions instead of
-    #   NearFieldBlockBuilder: this loses about 1-2 orders of magnitude in the
-    #   plateau
-    #
     ambient_dim = 3
 
     nelements = 24
@@ -443,7 +415,7 @@ def run_qbx_skeletonization(ctx_factory,
     source_ovsmp = 1
     qbx_order = 4
 
-    nblocks = 48
+    nclusters = 48
     source_size = 900
     target_size = 900
     proxy_radius_factor = 1.25
@@ -506,19 +478,19 @@ def run_qbx_skeletonization(ctx_factory,
 
     # {{{ set up indices
 
-    # mat_indices, itarget, jsource = make_block_indices(
+    # mat_indices, itarget, jsource = make_cluster_indices(
     #         actx, density_discr,
-    #         nblocks=nblocks,
+    #         nclusters=nclusters,
     #         itarget=itarget, jsource=jsource)
-    mat_indices, itarget, jsource = make_block_indices_single(
+    mat_indices, itarget, jsource = make_cluster_indices_single(
             actx, density_discr,
             source_size=source_size, target_size=target_size,
             itarget=itarget, jsource=jsource)
 
     if visualize:
         marker = np.zeros(density_discr.ndofs)
-        marker[mat_indices.col.indices] = 1
-        marker[mat_indices.row.indices] = -1
+        marker[mat_indices.sources.indices] = 1
+        marker[mat_indices.targets.indices] = -1
 
         from arraycontext import thaw, unflatten
         template_ary = thaw(density_discr.nodes()[0], actx)
@@ -531,13 +503,13 @@ def run_qbx_skeletonization(ctx_factory,
 
     # {{{ get block centers and radii
 
-    nsources = mat_indices.col.indices.size
-    ntargets = mat_indices.row.indices.size
+    nsources = mat_indices.sources.indices.size
+    ntargets = mat_indices.targets.indices.size
     logger.info("ntargets %4d nsources %4d", ntargets, nsources)
 
     nodes = ds.get_discr_nodes(density_discr)
-    source_nodes = mat_indices.col.block_take(nodes.T, 0).T
-    target_nodes = mat_indices.row.block_take(nodes.T, 0).T
+    source_nodes = mat_indices.sources.cluster_take(nodes.T, 0).T
+    target_nodes = mat_indices.targets.cluster_take(nodes.T, 0).T
 
     source_radius, source_center = ds.get_point_radius_and_center(source_nodes)
     logger.info("sources: radius %.5e center %s", source_radius, source_center)
@@ -554,7 +526,7 @@ def run_qbx_skeletonization(ctx_factory,
     expansion_radii = bind(places,
                            sym.expansion_radii(ambient_dim),
                            auto_where=target_dd)(actx)
-    expansion_radii = mat_indices.row.block_take(
+    expansion_radii = mat_indices.targets.cluster_take(
         actx.to_numpy(flatten(expansion_radii, actx)), 0
     )
     max_expansion_radius = np.max(expansion_radii)
@@ -621,7 +593,7 @@ def run_qbx_skeletonization(ctx_factory,
         "source_ovsmp": source_ovsmp,
         "qbx_order": qbx_order,
         # skeletonization
-        "nblocks": nblocks,
+        "nclusters": nclusters,
         "proxy_radius_factory": proxy_radius_factor,
         "ntargets": ntargets, "itarget": itarget,
         "nsources": nsources, "jsource": jsource,
@@ -658,7 +630,7 @@ def run_qbx_skeletonization(ctx_factory,
                     1.0e-5 * c * rho ** np.sqrt(id_rank[i]))
 
     if visualize:
-        U, sigma, V = la.svd(info.error_mat)        # noqa: N806
+        U, _, V = la.svd(info.error_mat)        # noqa: N806
 
         from arraycontext import thaw, unflatten
         template_ary = thaw(density_discr.nodes()[0], actx)
@@ -666,13 +638,13 @@ def run_qbx_skeletonization(ctx_factory,
         vec = np.zeros(density_discr.ndofs)
         names_and_fields = [("normal", normals)]
         for k in range(4):
-            vec[mat_indices.row.indices] = U[:, k].ravel()
+            vec[mat_indices.targets.indices] = U[:, k].ravel()
             names_and_fields.append((
                 f"U_{k}", unflatten(template_ary, actx.from_numpy(vec), actx)
                 ))
 
             vec[:] = 0.0
-            vec[mat_indices.col.indices] = V[k, :].ravel()
+            vec[mat_indices.sources.indices] = V[k, :].ravel()
             names_and_fields.append((
                 f"V_{k}", unflatten(template_ary, actx.from_numpy(vec), actx)
                 ))
@@ -684,12 +656,12 @@ def run_qbx_skeletonization(ctx_factory,
         for k in range(4):
             density = V[k, :].ravel()
 
-            vec[mat_indices.row.indices] = info.rec_mat @ density
+            vec[mat_indices.targets.indices] = info.rec_mat @ density
             names_and_fields.append((
                 f"rec_mat_{k}", unflatten(template_ary, actx.from_numpy(vec), actx)
                 ))
 
-            vec[mat_indices.row.indices] = info.interaction_mat @ density
+            vec[mat_indices.targets.indices] = info.interaction_mat @ density
             names_and_fields.append((
                 f"int_mat_{k}", unflatten(template_ary, actx.from_numpy(vec), actx)
                 ))
@@ -776,7 +748,7 @@ def run_qbx_skeletonization(ctx_factory,
     #                 )
     #         pxy = proxy(actx, target_dd, target_indices)
 
-    #         proxy_indices = MatrixBlockIndexRanges(target_indices, pxy.indices)
+    #         proxy_indices = TargetAndSourceClusterList(target_indices, pxy.indices)
     #         places = places.merge({
     #             proxy_dd.geometry: pxy.as_sources(actx, qbx_order)
     #             })
@@ -981,4 +953,4 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         exec(sys.argv[1])
     else:
-        run_qbx_skeletonization(cl._csc)
+        run_qbx_skeletonization(cl.create_some_context)

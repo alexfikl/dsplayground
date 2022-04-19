@@ -12,7 +12,7 @@ import matplotlib.pyplot as mp
 import matplotlib.patches as patch
 
 from pytential import bind, sym
-from pytential.linalg.utils import MatrixBlockIndexRanges
+from pytential.linalg.utils import TargetAndSourceClusterList
 from pytools import memoize_in
 
 import logging
@@ -23,22 +23,22 @@ logger = logging.getLogger(__name__)
 class InteractionInfo:
     source_dd: sym.DOFDescriptor
     target_dd: sym.DOFDescriptor
-    index_set: MatrixBlockIndexRanges
+    tgt_src_index: TargetAndSourceClusterList
     evaluate: Any
 
     @property
     def ntargets(self):
-        return self.index_set.row.block_size(0)
+        return self.tgt_src_index.targets.cluster_size(0)
 
     @property
     def nsources(self):
-        return self.index_set.col.block_size(0)
+        return self.tgt_src_index.sources.cluster_size(0)
 
     def interaction_mat(self, places):
         @memoize_in(self, (InteractionInfo, "interaction_mat"))
         def mat():
             return self.evaluate(places,
-                    index_set=self.index_set,
+                    tgt_src_index=self.tgt_src_index,
                     auto_where=(self.source_dd, self.target_dd))
 
         return mat()
@@ -50,7 +50,7 @@ def find_source_in_proxy_ball(
         proxy_center: np.ndarray, proxy_radius: float,
         ) -> InteractionInfo:
     source_dd = direct.source_dd
-    index_set = direct.index_set
+    tgt_src_index = direct.tgt_src_index
 
     assert source_dd == direct.target_dd
 
@@ -58,18 +58,16 @@ def find_source_in_proxy_ball(
     discr = places.get_discretization(source_dd.geometry, source_dd.discr_stage)
     nodes = ds.get_discr_nodes(discr)
 
-    source_nodes = index_set.col.block_take(nodes.T, 0).T
+    source_nodes = tgt_src_index.sources.cluster_take(nodes.T, 0).T
     mask = la.norm(
             source_nodes - proxy_center.reshape(-1, 1), axis=0
             ) < (proxy_radius - 1.0e-8)
 
-    from pytential.linalg.utils import make_block_index_from_array
-    neighbor_indices = make_block_index_from_array([
-        index_set.col.indices[mask].copy()
-        ])
-    index_set = MatrixBlockIndexRanges(index_set.row, neighbor_indices)
+    from pytential.linalg.utils import make_index_list
+    neighbor_indices = make_index_list([tgt_src_index.sources.indices[mask].copy()])
+    tgt_src_index = TargetAndSourceClusterList(tgt_src_index.sources, neighbor_indices)
 
-    return replace(direct, index_set=index_set)
+    return replace(direct, tgt_src_index=tgt_src_index)
 
 
 def compute_target_reconstruction_error(
@@ -83,7 +81,7 @@ def compute_target_reconstruction_error(
 
     if proxy_center is not None and proxy_radius is not None:
         proxy_mat = proxy.interaction_mat(places)
-        assert proxy_mat.shape == proxy.index_set.block_shape(0, 0)
+        assert proxy_mat.shape == proxy.tgt_src_index.cluster_shape(0, 0)
 
         neighbors = find_source_in_proxy_ball(
                 actx, places, direct, proxy,
@@ -94,7 +92,7 @@ def compute_target_reconstruction_error(
 
         if neighbors.nsources > 0:
             neighbors_mat = neighbors.interaction_mat(places)
-            assert neighbors_mat.shape == neighbors.index_set.block_shape(0, 0)
+            assert neighbors_mat.shape == neighbors.tgt_src_index.cluster_shape(0, 0)
 
             proxy_mat = np.hstack([neighbors_mat, proxy_mat])
     else:
@@ -153,7 +151,7 @@ def main(ctx_factory,
     qbx_order = 4
 
     proxy_radius_factor = 1.25
-    nblocks = 8
+    nclusters = 8
 
     p2p = "p2p" if use_p2p_proxy else "qbx"
     key = f"{p2p}_{nelements:04d}_{qbx_order:02d}_{proxy_radius_factor:.2f}"
@@ -200,34 +198,32 @@ def main(ctx_factory,
     # {{{ set up indices
 
     from pytential.linalg.proxy import partition_by_nodes
-    max_particles_in_box = density_discr.ndofs // nblocks
+    max_particles_in_box = density_discr.ndofs // nclusters
     partition = partition_by_nodes(actx, density_discr,
             tree_kind=None, max_particles_in_box=max_particles_in_box)
-    nblocks = partition.nblocks
+    nclusters = partition.nclusters
 
-    from pytential.linalg.utils import make_block_index_from_array
+    from pytential.linalg.utils import make_index_list
     # NOTE: tree_kind == None just goes around the curve in order, so we
-    # expect that nblocks // 2 is about opposite to 0
+    # expect that nclusters // 2 is about opposite to 0
     if itarget is None:
-        itarget = nblocks // 2
+        itarget = nclusters // 2
     if jsource is None:
         jsource = 0
 
-    source_indices = make_block_index_from_array(
-            [partition.block_indices(jsource)])
-    target_indices = make_block_index_from_array(
-            [partition.block_indices(itarget)])
+    source_indices = make_index_list([partition.cluster_indices(jsource)])
+    target_indices = make_index_list([partition.cluster_indices(itarget)])
 
     logger.info("itarget %3d jsource %3d", itarget, jsource)
-    logger.info("ranges: %s", np.diff(partition.ranges))
+    logger.info("starts: %s", np.diff(partition.starts))
 
     # }}}
 
     # {{{ determine radii
 
     nodes = ds.get_discr_nodes(density_discr)
-    source_nodes = source_indices.block_take(nodes.T, 0).T
-    target_nodes = target_indices.block_take(nodes.T, 0).T
+    source_nodes = source_indices.cluster_take(nodes.T, 0).T
+    target_nodes = target_indices.cluster_take(nodes.T, 0).T
 
     source_radius, source_center = ds.get_point_radius_and_center(source_nodes)
     logger.info("sources: radius %.5e center %s", source_radius, source_center)
@@ -254,8 +250,8 @@ def main(ctx_factory,
         return ds.as_source(actx, make_proxy_points(nproxies), qbx_order=qbx_order)
 
     def make_proxy_indices(proxies):
-        ip = make_block_index_from_array([np.arange(proxies.ndofs)])
-        return MatrixBlockIndexRanges(target_indices, ip)
+        ip = make_index_list([np.arange(proxies.ndofs)])
+        return TargetAndSourceClusterList(target_indices, ip)
 
     # }}}
 
@@ -313,14 +309,14 @@ def main(ctx_factory,
     direct = InteractionInfo(
             source_dd=source_dd,
             target_dd=target_dd,
-            index_set=MatrixBlockIndexRanges(target_indices, source_indices),
+            tgt_src_index=TargetAndSourceClusterList(target_indices, source_indices),
             evaluate=partial(ds.evaluate_qbx, actx, knl, context={})
             )
 
     proxy = InteractionInfo(
             source_dd=proxy_dd,
             target_dd=target_dd,
-            index_set=None,
+            tgt_src_index=None,
             evaluate=proxy_op)
 
     # }}}
@@ -336,7 +332,7 @@ def main(ctx_factory,
 
     proxies = make_source_proxies(estimate_nproxies)
     places = places.merge({proxy_dd.geometry: proxies})
-    proxy = replace(proxy, index_set=make_proxy_indices(proxies))
+    proxy = replace(proxy, tgt_src_index=make_proxy_indices(proxies))
 
     id_eps_array = 10.0**(-np.arange(2, 16))
     rec_errors = np.empty((id_eps_array.size,))
@@ -359,7 +355,7 @@ def main(ctx_factory,
                 sym.expansion_radii(places.ambient_dim),
                 auto_where=source_dd)(actx)
         expansion_radii = flatten_to_numpy(actx, expansion_radii)
-        target_expansion_radii = target_indices.block_take(expansion_radii, 0)
+        target_expansion_radii = target_indices.cluster_take(expansion_radii, 0)
         qbx_radius = np.min(target_expansion_radii)
 
         estimate_min_id_eps = ds.estimate_qbx_vs_p2p_error(
@@ -399,7 +395,7 @@ def main(ctx_factory,
         while nproxies < max(ntargets, nsources):
             proxies = make_source_proxies(nproxies)
             places = places.merge({proxy_dd.geometry: proxies})
-            proxy = replace(proxy, index_set=make_proxy_indices(proxies))
+            proxy = replace(proxy, tgt_src_index=make_proxy_indices(proxies))
 
             rec_error, rank = compute_target_reconstruction_error(
                     actx, places, direct, proxy,
@@ -448,4 +444,4 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         exec(sys.argv[1])
     else:
-        main(cl._csc)
+        main(cl.create_some_context)

@@ -8,7 +8,7 @@ from sumpy.kernel import Kernel
 from pytential import GeometryCollection
 from pytential.source import PointPotentialSource
 from pytential.target import PointsTarget
-from pytential.linalg.utils import MatrixBlockIndexRanges
+from pytential.linalg.utils import TargetAndSourceClusterList
 
 
 # {{{ p2p
@@ -16,7 +16,7 @@ from pytential.linalg.utils import MatrixBlockIndexRanges
 def evaluate_p2p(
         actx: ArrayContext, kernel: Kernel, places: GeometryCollection,
         auto_where: Optional[Any] = None,
-        index_set: Optional[MatrixBlockIndexRanges] = None,
+        tgt_src_index: Optional[TargetAndSourceClusterList] = None,
         context: Optional[Dict[str, Any]] = None) -> np.ndarray:
     if context is None:
         context = {}
@@ -39,17 +39,17 @@ def evaluate_p2p(
     source = auto_where[0]
     source_discr = places.get_discretization(source.geometry, source.discr_stage)
 
-    if index_set is not None:
-        assert index_set.nblocks == 1
-        from pytential.symbolic.matrix import FarFieldBlockBuilder
-        mat = FarFieldBlockBuilder(actx,
+    if tgt_src_index is not None:
+        assert tgt_src_index.nclusters == 1
+        from pytential.symbolic.matrix import P2PClusterMatrixBuilder
+        mat = P2PClusterMatrixBuilder(actx,
                 dep_expr=sym_sigma, other_dep_exprs=[],
                 dep_source=source_discr, dep_discr=source_discr,
-                places=places, index_set=index_set, context=context,
+                places=places, tgt_src_index=tgt_src_index, context=context,
                 exclude_self=False, _weighted=False,
                 )(sym_op)
 
-        mat = mat.reshape(index_set.block_shape(0, 0))
+        mat = mat.reshape(tgt_src_index.cluster_shape(0, 0))
     else:
         from pytential.symbolic.matrix import P2PMatrixBuilder
         mat = P2PMatrixBuilder(actx,
@@ -82,7 +82,7 @@ def evaluate_p2p_simple(
 def evaluate_qbx(
         actx: ArrayContext, kernel: Kernel, places: GeometryCollection,
         auto_where: Optional[Any] = None,
-        index_set: Optional[MatrixBlockIndexRanges] = None,
+        tgt_src_index: Optional[TargetAndSourceClusterList] = None,
         context: Optional[Dict[str, Any]] = None) -> np.ndarray:
     if context is None:
         context = {}
@@ -105,17 +105,17 @@ def evaluate_qbx(
     dep_source = places.get_geometry(source.geometry)
     dep_discr = places.get_discretization(source.geometry, source.discr_stage)
 
-    if index_set is not None:
-        assert index_set.nblocks == 1
-        from pytential.symbolic.matrix import NearFieldBlockBuilder
-        mat = NearFieldBlockBuilder(actx,
+    if tgt_src_index is not None:
+        assert tgt_src_index.nclusters == 1
+        from pytential.symbolic.matrix import QBXClusterMatrixBuilder
+        mat = QBXClusterMatrixBuilder(actx,
                 dep_expr=sym_sigma, other_dep_exprs=[],
                 dep_source=dep_source, dep_discr=dep_discr,
-                places=places, index_set=index_set, context=context,
+                places=places, tgt_src_index=tgt_src_index, context=context,
                 _weighted=False
                 )(sym_op)
 
-        mat = mat.reshape(index_set.block_shape(0, 0))
+        mat = mat.reshape(tgt_src_index.cluster_shape(0, 0))
     else:
         from pytential.symbolic.matrix import MatrixBuilder
         mat = MatrixBuilder(actx,

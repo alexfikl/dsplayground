@@ -294,4 +294,4 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         exec(sys.argv[1])
     else:
-        run_error_model(cl._csc)
+        run_error_model(cl.create_some_context)
