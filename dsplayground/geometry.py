@@ -4,6 +4,7 @@ import numpy as np
 import numpy.linalg as la
 
 from arraycontext import ArrayContext
+from meshmode.mesh import Mesh
 from meshmode.discretization import Discretization
 from pytools import memoize_on_first_arg
 
@@ -120,6 +121,53 @@ def make_sphere(npoints: int, *, method: str = "equidistant") -> np.ndarray:
         return sphere_sample_equidistant(npoints, r=1.0)
     else:
         raise ValueError(f"unknown sampling method: '{method}'")
+
+# }}}
+
+
+# {{{ generation
+
+def make_gmsh_sphere(
+        order: int, cls: type, *,
+        radius: float = 1.0,
+        length: float = 0.3) -> Mesh:
+    from meshmode.mesh.io import ScriptSource
+    from meshmode.mesh import SimplexElementGroup, TensorProductElementGroup
+    if issubclass(cls, SimplexElementGroup):
+        script = ScriptSource(
+            """
+            Mesh.CharacteristicLengthMax = %(length)g;
+            Mesh.HighOrderOptimize = 1;
+            Mesh.Algorithm = 1;
+
+            SetFactory("OpenCASCADE");
+            Sphere(1) = {0, 0, 0, %(radius)g};
+            """ % {"radius": radius, "length": length},
+            "geo")
+    elif issubclass(cls, TensorProductElementGroup):
+        script = ScriptSource(
+            """
+            Mesh.CharacteristicLengthMax = %(length)g;
+            Mesh.HighOrderOptimize = 1;
+            Mesh.Algorithm = 6;
+
+            SetFactory("OpenCASCADE");
+            Sphere(1) = {0, 0, 0, %(radius)g};
+            Recombine Surface "*" = 0.0001;
+            """ % {"radius": radius, "length": length},
+            "geo")
+    else:
+        raise TypeError
+
+    from meshmode.mesh.io import generate_gmsh
+    return generate_gmsh(
+            script,
+            order=order,
+            dimensions=2,
+            force_ambient_dim=3,
+            target_unit="MM",
+            )
+
 # }}}
 
 

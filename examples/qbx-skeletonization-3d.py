@@ -130,45 +130,6 @@ def compute_target_reconstruction_error(
 
 # {{{ set up
 
-def make_gmsh_sphere(order: int, cls: type):
-    from meshmode.mesh.io import ScriptSource
-    from meshmode.mesh import SimplexElementGroup, TensorProductElementGroup
-    if issubclass(cls, SimplexElementGroup):
-        script = ScriptSource(
-            """
-            Mesh.CharacteristicLengthMax = 0.4;
-            Mesh.HighOrderOptimize = 1;
-            Mesh.Algorithm = 1;
-
-            SetFactory("OpenCASCADE");
-            Sphere(1) = {0, 0, 0, 1.5};
-            """,
-            "geo")
-    elif issubclass(cls, TensorProductElementGroup):
-        script = ScriptSource(
-            """
-            Mesh.CharacteristicLengthMax = 0.1;
-            Mesh.HighOrderOptimize = 1;
-            Mesh.Algorithm = 6;
-
-            SetFactory("OpenCASCADE");
-            Sphere(1) = {0, 0, 0, 0.5};
-            Recombine Surface "*" = 0.0001;
-            """,
-            "geo")
-    else:
-        raise TypeError
-
-    from meshmode.mesh.io import generate_gmsh
-    return generate_gmsh(
-            script,
-            order=order,
-            dimensions=2,
-            force_ambient_dim=3,
-            target_unit="MM",
-            )
-
-
 def make_geometry_collection(
         actx, *,
         nelements: int,
@@ -188,7 +149,8 @@ def make_geometry_collection(
                 group_cls=mmesh.TensorProductElementGroup,
                 )
     elif mesh_name == "gmsh_sphere":
-        mesh = make_gmsh_sphere(target_order, mmesh.SimplexElementGroup)
+        import dsplayground as ds
+        mesh = ds.make_gmsh_sphere(target_order, mmesh.SimplexElementGroup)
     else:
         raise ValueError(f"unknown mesh: '{mesh_name}'")
 

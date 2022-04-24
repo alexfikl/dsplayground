@@ -1,8 +1,13 @@
+from typing import Any, Iterator
+from contextlib import contextmanager
+
 from dsplayground.geometry import (
     make_grid_points, make_axis_points, make_circle, make_sphere,
     make_random_points_in_box, make_random_points_in_sphere,
 
     as_source, as_target, affine_map,
+
+    make_gmsh_sphere,
 
     get_point_radius_and_center,
     get_discr_nodes,
@@ -23,6 +28,8 @@ __all__ = (
     "make_grid_points", "make_axis_points", "make_circle", "make_sphere",
     "make_random_points_in_box", "make_random_points_in_sphere",
 
+    "make_gmsh_sphere",
+
     "as_source", "as_target", "affine_map",
     "get_point_radius_and_center",
     "get_discr_nodes",
@@ -30,7 +37,8 @@ __all__ = (
     "find_nodes_around_center",
     "find_farthest_apart_cluster",
 
-    "get_cl_array_context",
+    "axis",
+    "get_cl_array_context", "dc_hash",
 
     "evaluate_p2p", "evaluate_qbx", "evaluate_p2p_simple",
 
@@ -40,6 +48,15 @@ __all__ = (
 
 
 # {{{ matplotlib
+
+@contextmanager
+def axis(fig, outfile: str, **kwargs: Any) -> Iterator[Any]:
+    try:
+        yield fig.gca()
+    finally:
+        fig.savefig(outfile, **kwargs)
+        fig.clf()
+
 
 def _initialize_matplotlib_defaults():
     import matplotlib
@@ -96,5 +113,21 @@ def get_cl_array_context(factory):
             # allocator=cl.tools.MemoryPool(cl.tools.ImmediateAllocator(queue)),
             allocator=None,
             force_device_scalars=True)
+
+# }}}
+
+
+# {{{
+
+def dc_hash(dc):
+    from collections.abc import Hashable
+    from dataclasses import fields
+    import hashlib
+    import json
+
+    return hashlib.md5(json.dumps({
+        f.name: getattr(dc, f.name) for f in fields(dc)
+        if isinstance(getattr(dc, f.name), Hashable)
+        }, sort_keys=True).encode()).hexdigest()
 
 # }}}
