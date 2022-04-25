@@ -38,7 +38,7 @@ __all__ = (
     "find_farthest_apart_cluster",
 
     "axis",
-    "get_cl_array_context", "dc_hash",
+    "get_cl_array_context", "dc_hash", "dc_dict",
 
     "evaluate_p2p", "evaluate_qbx", "evaluate_p2p_simple",
 
@@ -54,7 +54,17 @@ def axis(fig, outfile: str, **kwargs: Any) -> Iterator[Any]:
     try:
         yield fig.gca()
     finally:
-        fig.savefig(outfile, **kwargs)
+        bbox_extra_artists = []
+        for ax in fig.axes:
+            legend = ax.get_legend()
+            if legend is not None:
+                bbox_extra_artists.append(legend)
+
+        fig.savefig(outfile,
+                bbox_extra_artists=tuple(bbox_extra_artists),
+                bbox_inches="tight",
+                **kwargs)
+
         fig.clf()
 
 
@@ -121,13 +131,17 @@ def get_cl_array_context(factory):
 
 def dc_hash(dc):
     from collections.abc import Hashable
-    from dataclasses import fields
     import hashlib
     import json
 
     return hashlib.md5(json.dumps({
-        f.name: getattr(dc, f.name) for f in fields(dc)
-        if isinstance(getattr(dc, f.name), Hashable)
+        key: value for key, value in dc_dict(dc).items()
+        if isinstance(value, Hashable)
         }, sort_keys=True).encode()).hexdigest()
+
+
+def dc_dict(dc):
+    from dataclasses import fields
+    return {f.name: getattr(dc, f.name) for f in fields(dc)}
 
 # }}}

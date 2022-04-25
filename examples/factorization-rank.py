@@ -34,6 +34,13 @@ def make_qbx_skeletonization_wrangler(places, sym_op, sym_sigma, *, auto_where):
             places, sym_op, sym_sigma,
             auto_where=auto_where)
 
+
+def get_mat_no_nbr(self, i):
+    shape = self.pxyindex.cluster_shape(i, i)
+    pxymat_i = self.pxyindex.flat_cluster_take(self.pxymat, i).reshape(*shape)
+
+    return [pxymat_i]
+
 # }}}
 
 
@@ -41,6 +48,7 @@ def make_qbx_skeletonization_wrangler(places, sym_op, sym_sigma, *, auto_where):
 
 @dataclass(frozen=True, unsafe_hash=True)
 class Geometry:
+
     # geometry
     target_order: int = 4
     source_ovsmp: int = 4
@@ -50,11 +58,10 @@ class Geometry:
     # skeletonization
     id_eps: float = 1.0e-15
     nclusters: int = 6
-    proxy_approx_count: int = 32
-    proxy_radius_factor: float = 1.0
     tree_kind = "adaptive-level-restricted"
 
-    mode: str = "qbx"
+    expn: str = "qbx"
+    mode: str = "full"
 
 
 @dataclass(frozen=True, unsafe_hash=True)
@@ -108,7 +115,17 @@ def run_error_model(ctx_factory, *,
     else:
         raise ValueError(f"unsupported dimension: {ambient_dim}")
 
-    basename = f"factorization_rank_{case.mode}_{ds.dc_hash(case)}"
+    basename = f"factorization_rank_{case.expn}_{case.mode}_{ds.dc_hash(case)}"
+
+    if case.mode == "full":
+        pass
+    elif case.mode == "nnbr":
+        # NOTE: ugly monkeypatching so that we don't actually skeletonize the
+        # nearfield neighbor nodes
+        from pytential.linalg import skeletonization
+        skeletonization._ProxyNeighborEvaluationResult.__getitem__ = get_mat_no_nbr
+    else:
+        raise ValueError(f"unknown mode: '{case.mode}'")
 
     # {{{ geometry
 
@@ -157,20 +174,20 @@ def run_error_model(ctx_factory, *,
     sym_op = sym.S(kernel, sym_sigma, qbx_forced_limit=+1)
 
     from pytential.symbolic.execution import _prepare_expr
-    sym_op_prep = _prepare_expr(places, sym_op)
+    sym_op_prep = _prepare_expr(places, sym_op, auto_where=dofdesc)
 
-    if case.mode == "p2p":
+    if case.expn == "p2p":
         from pytential.symbolic.matrix import P2PMatrixBuilder as MatrixBuilder
         wrangler = make_p2p_skeletonization_wrangler(
                 places, sym_op, sym_sigma,
                 auto_where=dofdesc)
-    elif case.mode == "qbx":
+    elif case.expn == "qbx":
         from pytential.symbolic.matrix import MatrixBuilder
         wrangler = make_qbx_skeletonization_wrangler(
                 places, sym_op, sym_sigma,
                 auto_where=dofdesc)
     else:
-        raise ValueError(f"unknown mode: '{case.mode}'")
+        raise ValueError(f"unknown expansion: '{case.expn}'")
 
     mat = MatrixBuilder(
         actx,
@@ -187,12 +204,10 @@ def run_error_model(ctx_factory, *,
     # {{{ clusters
 
     from pytential.linalg import QBXProxyGenerator
-    proxy_generator = QBXProxyGenerator(places,
-            radius_factor=case.proxy_radius_factor,
-            approx_nproxy=8)
+    proxy_generator = QBXProxyGenerator(places, radius_factor=1.0, approx_nproxy=8)
     pxy = proxy_generator(
-            actx, dofdesc, tgt_src_index.sources
-            ).to_numpy(actx, stack=True)
+            actx, dofdesc, tgt_src_index.sources, include_cluster_radii=True,
+            ).to_numpy(actx, stack_nodes=True)
 
     # find biggest cluster and use it as a target
     n_cluster_sizes = np.diff(cindex.starts)
@@ -225,46 +240,73 @@ def run_error_model(ctx_factory, *,
     from pytential.linalg.skeletonization import \
             _skeletonize_block_by_proxy_with_mats
 
-    nproxies = np.linspace(4, n_cluster_sizes[itarget], 8, dtype=np.int64)
-    skel_rank = np.empty(nproxies.shape, dtype=np.int64)
-    error_far = np.empty(nproxies.shape, dtype=np.float64)
-    error_near = np.empty(nproxies.shape, dtype=np.float64)
+    factors = np.linspace(1.0, 1.5, 4, endpoint=True)
+    nproxies = np.logspace(
+            np.log10(4),
+            np.log10(n_cluster_sizes[itarget] + 128),
+            12, dtype=np.int64)
+
+    skel_id_rank = np.empty((nproxies.size, factors.size), dtype=np.int64)
+    skel_num_rank = np.empty((nproxies.size, factors.size), dtype=np.int64)
+
+    error_far = np.empty((nproxies.size, factors.size), dtype=np.float64)
+    error_near = np.empty((nproxies.size, factors.size), dtype=np.float64)
 
     for i, nproxy in enumerate(nproxies):
-        proxy_generator = QBXProxyGenerator(places,
-                radius_factor=case.proxy_radius_factor,
-                approx_nproxy=nproxy)
+        for j, proxy_radius_factor in enumerate(factors):
+            proxy_generator = QBXProxyGenerator(places,
+                    radius_factor=proxy_radius_factor,
+                    approx_nproxy=nproxy)
 
-        L, R, skel_tgt_src_index, _, _ = (                      # noqa: N806
-                _skeletonize_block_by_proxy_with_mats(
-                    actx, 0, 0, places, proxy_generator, wrangler, tgt_src_index,
-                    id_eps=case.id_eps,
-                    max_particles_in_box=max_particles_in_box))
+            L, R, skel_tgt_src_index, _, tgt = (                        # noqa: N806
+                    _skeletonize_block_by_proxy_with_mats(
+                        actx, 0, 0, places, proxy_generator, wrangler, tgt_src_index,
+                        id_eps=case.id_eps,
+                        max_particles_in_box=max_particles_in_box))
+            tgt_mat = np.hstack(tgt[itarget])
 
-        from pytential.linalg import SkeletonizationResult
-        skeleton = SkeletonizationResult(
-                L=L, R=R,
-                tgt_src_index=tgt_src_index,
-                skel_tgt_src_index=skel_tgt_src_index)
+            from pytential.linalg import SkeletonizationResult
+            skeleton = SkeletonizationResult(
+                    L=L, R=R,
+                    tgt_src_index=tgt_src_index,
+                    skel_tgt_src_index=skel_tgt_src_index)
 
-        # skeletonization rank
-        skel_rank[i] = L[itarget, itarget].shape[1]
+            # skeletonization rank
+            skel_id_rank[i, j] = L[itarget, itarget].shape[1]
+            skel_num_rank[i, j] = la.matrix_rank(tgt_mat, tol=case.id_eps)
 
-        from pytential.linalg.utils import cluster_skeletonization_error
-        blk_err_l, blk_err_r = cluster_skeletonization_error(
-                mat, skeleton, ord=2, relative=True)
+            from pytential.linalg.utils import cluster_skeletonization_error
+            blk_err_l, blk_err_r = cluster_skeletonization_error(
+                    mat, skeleton, ord=2, relative=True)
 
-        error_far[i] = blk_err_l[itarget, jsource_far]
-        error_near[i] = blk_err_l[itarget, jsource_near]
+            error_far[i, j] = blk_err_l[itarget, jsource_far]
+            error_near[i, j] = blk_err_l[itarget, jsource_near]
 
-        logger.info("nproxy %4d rank %4d error far %.12e near %.12e",
-                nproxy, skel_rank[i], error_far[i], error_near[i])
+            logger.info(
+                    "shape %4dx%4d nproxy %4d rank %4d / %4d far %.12e near %.12e",
+                    tgt_mat.shape[0], tgt_mat.shape[1], nproxy,
+                    skel_id_rank[i, j], skel_num_rank[i, j],
+                    error_far[i, j], error_near[i, j])
+
+        logger.info("")
 
     filename = f"{basename}.npz"
     np.savez_compressed(filename,
+            parameters=ds.dc_dict(case),
+            # geometry
+            ambient_dim=ambient_dim,
+            # skeletonization info
+            id_eps=case.id_eps,
+            itarget=itarget, jsource_far=jsource_far, jsource_near=jsource_near,
+            n_cluster_sizes=n_cluster_sizes,
+            proxy_radii=pxy.radii,
+            proxy_centers=pxy.centers,
+            cluster_radii=pxy._cluster_radii,
+            # skeletonization results
+            proxy_factors=factors,
             nproxies=nproxies,
-            skel_rank=skel_rank,
-            max_rank=n_cluster_sizes[itarget],
+            skel_id_rank=skel_id_rank,
+            skel_num_rank=skel_num_rank,
             error_far=error_far,
             error_near=error_near,
             )
@@ -330,17 +372,116 @@ def plot_error_model(filename: str):
     basename = filename.with_suffix("")
 
     d = np.load(filename)
+    ambient_dim = d["ambient_dim"]
+    id_eps = d["id_eps"]
+
+    factors = d["proxy_factors"]
+    nproxies = d["nproxies"]
+
+    centers = d["proxy_centers"]
+    cradii = d["cluster_radii"]
+
+    itarget = d["itarget"]
+    jsource = d["jsource_far"]
+
+    radius_ratio = cradii / d["proxy_radii"]
+    alpha = radius_ratio[itarget]
+
+    source_radius_far = (
+            la.norm(centers[:, itarget] - centers[:, jsource])
+            - cradii[jsource])
+    rho = cradii[itarget] / source_radius_far
+
+    logger.info("alpha %.15f rho %.15f id_eps %.5e", alpha, rho, id_eps)
 
     import dsplayground as ds
     fig = mp.figure()
 
+    # {{{ plot rank
+
+    if ambient_dim == 2:
+        model_rank = 0.5 * np.full(
+                nproxies.shape, np.log((1 - alpha) * id_eps) / np.log(alpha) - 1)
+        # model_rank = 0.5 * nproxies
+    elif ambient_dim == 3:
+        # NOTE: assuming r = p (p + 1)
+        model_rank = int((-1 + np.sqrt(1 + 4 * nproxies)) / 2)
+    else:
+        raise ValueError(f"unsupported dimension: {ambient_dim}")
+    logger.info("model_rank %s", model_rank)
+
     outfile = basename.with_stem(f"{basename.stem}_rank")
     with ds.axis(fig, outfile) as ax:
-        ax.plot(d["nproxies"], d["skel_rank"])
-        ax.axhline(d["max_rank"], color="k", ls="--")
+        max_rank = d["n_cluster_sizes"][itarget]
+
+        for i in range(factors.size):
+            line, = ax.plot(nproxies, d["skel_id_rank"][:, i], "v-",
+                    label=f"${factors[i]:.2f}$")
+            ax.plot(nproxies, d["skel_num_rank"][:, i], "^-",
+                    color=line.get_color())
+
+        # ax.plot(nproxies, model_rank, "o-", label="$Model$")
+        ax.plot(nproxies, nproxies, "k:")
+        ax.axhline(max_rank, color="k", ls="--")
 
         ax.set_xlabel("$Proxy$")
         ax.set_ylabel("$Rank$")
+        ax.legend(
+                bbox_to_anchor=(1.02, 0, 0.2, 1.0),
+                loc="upper left", mode="expand",
+                borderaxespad=0, ncol=1)
+
+    # }}}
+
+    # {{{ plot errors
+
+    outfile = basename.with_stem(f"{basename.stem}_error_far")
+    with ds.axis(fig, outfile) as ax:
+        ax.semilogy(nproxies, np.full(nproxies.shape, 1.0e-15), "k--")
+        for i in range(factors.size):
+            p = 0.5 * d["skel_id_rank"][:, i]
+
+            # NOTE: this also fixes the constant to match the actual error
+            error_model_far = rho**(p + 1) / (1 - rho) / (p + 1)
+            error_model_far *= np.max(d["error_far"][:, i]) / np.max(error_model_far)
+            error_model_far = np.clip(error_model_far, 1.0e-16, np.inf)
+
+            line, = ax.semilogy(nproxies, d["error_far"][:, i], "v-",
+                    label=f"${factors[i]:.2f}$")
+            ax.semilogy(nproxies, error_model_far, "--", color=line.get_color())
+
+        ax.set_ylim([1.0e-16, 1])
+        ax.set_xlabel("$Proxy$")
+        ax.set_ylabel("$Relative~ Error$")
+        ax.legend(
+                bbox_to_anchor=(1.02, 0, 0.2, 1.0),
+                loc="upper left", mode="expand",
+                borderaxespad=0, ncol=1)
+
+    outfile = basename.with_stem(f"{basename.stem}_error_near")
+    with ds.axis(fig, outfile) as ax:
+        ax.semilogy(nproxies, np.full(nproxies.shape, 1.0e-15), "k--")
+        for i in range(factors.size):
+            p = 0.5 * d["skel_id_rank"][:, i]
+
+            # NOTE: this also fixes the constant to match the actual error
+            error_model_near = rho**(p + 1) / (1 - rho) / (p + 1)
+            error_model_near *= np.max(d["error_near"][:, i]) / np.max(error_model_near)
+            error_model_near = np.clip(error_model_near, 1.0e-16, np.inf)
+
+            line, = ax.semilogy(nproxies, d["error_near"][:, i], "v-",
+                    label=f"${factors[i]:.2f}$")
+            ax.semilogy(nproxies, error_model_near, "--", color=line.get_color())
+
+        ax.set_ylim([1.0e-16, 1])
+        ax.set_xlabel("$Proxy$")
+        ax.set_ylabel("$Relative~ Error$")
+        ax.legend(
+                bbox_to_anchor=(1.02, 0, 0.2, 1.0),
+                loc="upper left", mode="expand",
+                borderaxespad=0, ncol=1)
+
+    # }}}
 
 # }}}
 
