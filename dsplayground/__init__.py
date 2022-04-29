@@ -81,7 +81,7 @@ def _initialize_matplotlib_defaults():
     mp.rc("figure", figsize=(10, 10), dpi=300)
     mp.rc("figure.constrained_layout", use=True)
     mp.rc("text", usetex=usetex)
-    mp.rc("legend", fontsize=24)
+    mp.rc("legend", fontsize=24, title_fontsize=24)
     mp.rc("lines", linewidth=2.5, markersize=10)
     mp.rc("axes", labelsize=32, titlesize=32)
     mp.rc("xtick", labelsize=24)

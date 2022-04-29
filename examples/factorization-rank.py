@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import numpy.linalg as la
@@ -41,6 +41,64 @@ def get_mat_no_nbr(self, i):
 
     return [pxymat_i]
 
+
+def far_cluster_target_skeletonization_error(
+        mat, skeleton, *, i, j, ord=2, relative=True
+        ) -> float:
+    assert i != j
+    tgt_src_index = skeleton.tgt_src_index
+    skel_tgt_src_index = skeleton.skel_tgt_src_index
+
+    # full matrix indices
+    f_tgt = tgt_src_index.targets.cluster_indices(i)
+    f_src = tgt_src_index.sources.cluster_indices(j)
+    blk = mat[np.ix_(f_tgt, f_src)]
+
+    # skeleton matrix indices
+    s_tgt = skel_tgt_src_index.targets.cluster_indices(i)
+    sblk = mat[np.ix_(s_tgt, f_src)]
+
+    # compute cluster errors
+    error = la.norm(blk - skeleton.L[i, i] @ sblk)
+    if relative:
+        error = error / la.norm(blk)
+
+    return error
+
+
+def near_cluster_target_skeletonization_error(
+        pxy, mat, skeleton, *, i, j, ord=2, relative=True,
+        ) -> float:
+    assert i != j
+    tgt_src_index = skeleton.tgt_src_index
+    skel_tgt_src_index = skeleton.skel_tgt_src_index
+
+    import dsplayground as ds
+    discr = pxy.discr
+    nodes = ds.get_discr_nodes(discr)
+
+    # find source indices outside of proxy ball only
+    src_nodes = tgt_src_index.sources.cluster_take(nodes.T, j).T
+    mask = la.norm(
+            src_nodes - pxy.centers[:, i].reshape(-1, 1), axis=0
+            ) > pxy.radii[i]
+
+    # full matrix indices
+    f_tgt = tgt_src_index.targets.cluster_indices(i)
+    f_src = tgt_src_index.sources.cluster_indices(j)[mask]
+    blk = mat[np.ix_(f_tgt, f_src)]
+
+    # skeleton matrix indices
+    s_tgt = skel_tgt_src_index.targets.cluster_indices(i)
+    sblk = mat[np.ix_(s_tgt, f_src)]
+
+    # compute cluster errors
+    error = la.norm(blk - skeleton.L[i, i] @ sblk)
+    if relative:
+        error = error / la.norm(blk)
+
+    return error
+
 # }}}
 
 
@@ -48,7 +106,6 @@ def get_mat_no_nbr(self, i):
 
 @dataclass(frozen=True, unsafe_hash=True)
 class Geometry:
-
     # geometry
     target_order: int = 4
     source_ovsmp: int = 4
@@ -67,7 +124,7 @@ class Geometry:
 @dataclass(frozen=True, unsafe_hash=True)
 class CurveGeometry(Geometry):
     radius: float = 3.0
-    resolution: int = 256
+    resolution: int = 512
 
     def get_mesh(self):
         import meshmode.mesh.generation as mgen
@@ -80,8 +137,10 @@ class CurveGeometry(Geometry):
 
 @dataclass(frozen=True, unsafe_hash=True)
 class SurfaceGeometry(Geometry):
+    nclusters: int = 12
+
     radius: float = 1.0
-    resolution: float = 0.4
+    resolution: float = 0.1
 
     def get_mesh(self):
         import meshmode.mesh as mmesh
@@ -162,6 +221,7 @@ def run_error_model(ctx_factory, *,
             dofdesc=dofdesc,
             tree_kind=case.tree_kind,
             max_particles_in_box=max_particles_in_box)
+    logger.info("%s", np.diff(cindex.starts))
 
     from pytential.linalg import TargetAndSourceClusterList
     tgt_src_index = TargetAndSourceClusterList(cindex, cindex)
@@ -189,15 +249,15 @@ def run_error_model(ctx_factory, *,
     else:
         raise ValueError(f"unknown expansion: '{case.expn}'")
 
-    mat = MatrixBuilder(
-        actx,
-        dep_expr=sym_sigma,
-        other_dep_exprs=[],
-        dep_source=qbx,
-        dep_discr=density_discr,
-        places=places,
-        context={},
-        _weighted=wrangler.weighted_sources)(sym_op_prep)
+    # mat = MatrixBuilder(
+    #     actx,
+    #     dep_expr=sym_sigma,
+    #     other_dep_exprs=[],
+    #     dep_source=qbx,
+    #     dep_discr=density_discr,
+    #     places=places,
+    #     context={},
+    #     _weighted=wrangler.weighted_sources)(sym_op_prep)
 
     # }}}
 
@@ -229,9 +289,22 @@ def run_error_model(ctx_factory, *,
     assert itarget != jsource_far and itarget != jsource_near
 
     if visualize:
-        plot_skeletonization_geometry(actx, pxy, basename,
-                itarget=itarget, jsource_far=jsource_far, jsource_near=jsource_near,
-                )
+        if ambient_dim == 2:
+            plot_skeletonization_curve_geometry(
+                    actx, pxy, basename,
+                    itarget=itarget,
+                    jsource_far=jsource_far,
+                    jsource_near=jsource_near,
+                    )
+        else:
+            plot_skeletonization_surface_geometry(
+                    actx, pxy, basename,
+                    itarget=itarget,
+                    jsource_far=jsource_far,
+                    jsource_near=jsource_near,
+                    )
+
+    1/0
 
     # }}}
 
@@ -275,12 +348,11 @@ def run_error_model(ctx_factory, *,
             skel_id_rank[i, j] = L[itarget, itarget].shape[1]
             skel_num_rank[i, j] = la.matrix_rank(tgt_mat, tol=case.id_eps)
 
-            from pytential.linalg.utils import cluster_skeletonization_error
-            blk_err_l, blk_err_r = cluster_skeletonization_error(
-                    mat, skeleton, ord=2, relative=True)
-
-            error_far[i, j] = blk_err_l[itarget, jsource_far]
-            error_near[i, j] = blk_err_l[itarget, jsource_near]
+            error_far[i, j] = far_cluster_target_skeletonization_error(
+                    mat, skeleton, i=itarget, j=jsource_far)
+            error_near[i, j] = near_cluster_target_skeletonization_error(
+                    tgt.pxy.to_numpy(actx, stack_nodes=True),
+                    mat, skeleton, i=itarget, j=jsource_near)
 
             logger.info(
                     "shape %4dx%4d nproxy %4d rank %4d / %4d far %.12e near %.12e",
@@ -314,7 +386,7 @@ def run_error_model(ctx_factory, *,
     # }}}
 
     if visualize:
-        plot_error_model(filename)
+        _plot_error_model(filename)
 
 # }}}
 
@@ -322,13 +394,12 @@ def run_error_model(ctx_factory, *,
 # {{{ plot
 
 
-def plot_skeletonization_geometry(actx, pxy, basename, *,
+def plot_skeletonization_curve_geometry(actx, pxy, basename, *,
         itarget, jsource_far, jsource_near):
     srcindex = pxy.srcindex
     dofdesc = pxy.dofdesc
     places = pxy.places
-    if places.ambient_dim != 2:
-        return
+    assert places.ambient_dim == 2
 
     import dsplayground as ds
     density_discr = places.get_discretization(dofdesc.geometry, dofdesc.discr_stage)
@@ -366,13 +437,62 @@ def plot_skeletonization_geometry(actx, pxy, basename, *,
     fig.savefig(f"{basename}_geometry")
 
 
-def plot_error_model(filename: str):
+def plot_skeletonization_surface_geometry(actx, pxy, basename, *,
+        itarget, jsource_far, jsource_near):
+    dofdesc = pxy.dofdesc
+    places = pxy.places
+    assert places.ambient_dim == 3
+
+    density_discr = places.get_discretization(dofdesc.geometry, dofdesc.discr_stage)
+    target_order = min(grp.order for grp in density_discr.groups)
+
+    from meshmode.mesh.generation import generate_sphere
+    ref_mesh = generate_sphere(1.0, target_order, uniform_refinement_rounds=1)
+
+    from meshmode.mesh.processing import affine_map
+    meshes = [density_discr.mesh]
+    indices = [0, itarget, jsource_near, jsource_far]
+    for i in indices[1:]:
+        meshes.append(
+                affine_map(ref_mesh, A=pxy.radii[i], b=pxy.centers[:, i])
+                )
+
+    from meshmode.mesh.processing import merge_disjoint_meshes
+    mesh = merge_disjoint_meshes(meshes)
+
+    from meshmode.discretization.poly_element import \
+            InterpolatoryQuadratureGroupFactory
+    from meshmode.discretization import Discretization
+    discr = Discretization(actx, mesh,
+            InterpolatoryQuadratureGroupFactory(target_order))
+
+    marker = discr.zeros(actx)
+    marker = type(marker)(actx, tuple([
+        indices[i] + subary for i, subary in enumerate(marker)
+        ]))
+
+    from meshmode.discretization.visualization import make_visualizer
+    vis = make_visualizer(actx, discr, target_order)
+    vis.write_vtk_file(f"{basename}_geometry.vtu", [
+        ("marker", marker)
+        ], overwrite=True)
+
+
+def plot_error_model(glob: Optional[str]) -> None:
+    import pathlib
+    for filename in pathlib.Path().glob(glob):
+        logger.info("%s", filename)
+        _plot_error_model(filename)
+
+
+def _plot_error_model(filename: str) -> None:
     import pathlib
     filename = pathlib.Path(filename)
     basename = filename.with_suffix("")
+    title = basename.name.split("_")[2].upper()
 
     d = np.load(filename)
-    ambient_dim = d["ambient_dim"]
+    # ambient_dim = d["ambient_dim"]
     id_eps = d["id_eps"]
 
     factors = d["proxy_factors"]
@@ -384,31 +504,17 @@ def plot_error_model(filename: str):
     itarget = d["itarget"]
     jsource = d["jsource_far"]
 
-    radius_ratio = cradii / d["proxy_radii"]
-    alpha = radius_ratio[itarget]
-
     source_radius_far = (
             la.norm(centers[:, itarget] - centers[:, jsource])
             - cradii[jsource])
     rho = cradii[itarget] / source_radius_far
 
-    logger.info("alpha %.15f rho %.15f id_eps %.5e", alpha, rho, id_eps)
+    logger.info("rho %.15f id_eps %.5e", rho, id_eps)
 
     import dsplayground as ds
     fig = mp.figure()
 
     # {{{ plot rank
-
-    if ambient_dim == 2:
-        model_rank = 0.5 * np.full(
-                nproxies.shape, np.log((1 - alpha) * id_eps) / np.log(alpha) - 1)
-        # model_rank = 0.5 * nproxies
-    elif ambient_dim == 3:
-        # NOTE: assuming r = p (p + 1)
-        model_rank = int((-1 + np.sqrt(1 + 4 * nproxies)) / 2)
-    else:
-        raise ValueError(f"unsupported dimension: {ambient_dim}")
-    logger.info("model_rank %s", model_rank)
 
     outfile = basename.with_stem(f"{basename.stem}_rank")
     with ds.axis(fig, outfile) as ax:
@@ -427,7 +533,8 @@ def plot_error_model(filename: str):
         ax.set_xlabel("$Proxy$")
         ax.set_ylabel("$Rank$")
         ax.legend(
-                bbox_to_anchor=(1.02, 0, 0.2, 1.0),
+                title=title,
+                bbox_to_anchor=(1.02, 0, 0.25, 1.0),
                 loc="upper left", mode="expand",
                 borderaxespad=0, ncol=1)
 
@@ -454,7 +561,8 @@ def plot_error_model(filename: str):
         ax.set_xlabel("$Proxy$")
         ax.set_ylabel("$Relative~ Error$")
         ax.legend(
-                bbox_to_anchor=(1.02, 0, 0.2, 1.0),
+                title=title,
+                bbox_to_anchor=(1.02, 0, 0.25, 1.0),
                 loc="upper left", mode="expand",
                 borderaxespad=0, ncol=1)
 
@@ -464,8 +572,10 @@ def plot_error_model(filename: str):
         for i in range(factors.size):
             p = 0.5 * d["skel_id_rank"][:, i]
 
+            alpha = factors[0] / factors[i] * (cradii / d["proxy_radii"])[itarget]
+            error_model_near = alpha**(p + 1) / (1 - alpha) / (p + 1)
+
             # NOTE: this also fixes the constant to match the actual error
-            error_model_near = rho**(p + 1) / (1 - rho) / (p + 1)
             error_model_near *= np.max(d["error_near"][:, i]) / np.max(error_model_near)
             error_model_near = np.clip(error_model_near, 1.0e-16, np.inf)
 
@@ -477,7 +587,8 @@ def plot_error_model(filename: str):
         ax.set_xlabel("$Proxy$")
         ax.set_ylabel("$Relative~ Error$")
         ax.legend(
-                bbox_to_anchor=(1.02, 0, 0.2, 1.0),
+                title=title,
+                bbox_to_anchor=(1.02, 0, 0.25, 1.0),
                 loc="upper left", mode="expand",
                 borderaxespad=0, ncol=1)
 
