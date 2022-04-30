@@ -46,22 +46,18 @@ def far_cluster_target_skeletonization_error(
         mat, skeleton, *, i, j, ord=2, relative=True
         ) -> float:
     assert i != j
-    tgt_src_index = skeleton.tgt_src_index
-    skel_tgt_src_index = skeleton.skel_tgt_src_index
-
-    # full matrix indices
-    f_tgt = tgt_src_index.targets.cluster_indices(i)
-    f_src = tgt_src_index.sources.cluster_indices(j)
-    blk = mat[np.ix_(f_tgt, f_src)]
 
     # skeleton matrix indices
-    s_tgt = skel_tgt_src_index.targets.cluster_indices(i)
-    sblk = mat[np.ix_(s_tgt, f_src)]
+    s_tgt = np.searchsorted(
+        skeleton.tgt_src_index.targets.cluster_indices(i),
+        skeleton.skel_tgt_src_index.targets.cluster_indices(i),
+        )
+    sblk = mat[s_tgt, :]
 
     # compute cluster errors
-    error = la.norm(blk - skeleton.L[i, i] @ sblk)
+    error = la.norm(mat - skeleton.L[i, i] @ sblk)
     if relative:
-        error = error / la.norm(blk)
+        error = error / la.norm(mat)
 
     return error
 
@@ -70,27 +66,26 @@ def near_cluster_target_skeletonization_error(
         pxy, mat, skeleton, *, i, j, ord=2, relative=True,
         ) -> float:
     assert i != j
-    tgt_src_index = skeleton.tgt_src_index
-    skel_tgt_src_index = skeleton.skel_tgt_src_index
 
     import dsplayground as ds
     discr = pxy.discr
     nodes = ds.get_discr_nodes(discr)
 
     # find source indices outside of proxy ball only
-    src_nodes = tgt_src_index.sources.cluster_take(nodes.T, j).T
+    src_nodes = skeleton.tgt_src_index.sources.cluster_take(nodes.T, j).T
     mask = la.norm(
             src_nodes - pxy.centers[:, i].reshape(-1, 1), axis=0
             ) > pxy.radii[i]
 
     # full matrix indices
-    f_tgt = tgt_src_index.targets.cluster_indices(i)
-    f_src = tgt_src_index.sources.cluster_indices(j)[mask]
-    blk = mat[np.ix_(f_tgt, f_src)]
+    blk = mat[:, mask]
 
     # skeleton matrix indices
-    s_tgt = skel_tgt_src_index.targets.cluster_indices(i)
-    sblk = mat[np.ix_(s_tgt, f_src)]
+    s_tgt = np.searchsorted(
+        skeleton.tgt_src_index.targets.cluster_indices(i),
+        skeleton.skel_tgt_src_index.targets.cluster_indices(i),
+        )
+    sblk = mat[:, mask][s_tgt, :]
 
     # compute cluster errors
     error = la.norm(blk - skeleton.L[i, i] @ sblk)
@@ -233,31 +228,16 @@ def run_error_model(ctx_factory, *,
     sym_sigma = sym.var("sigma")
     sym_op = sym.S(kernel, sym_sigma, qbx_forced_limit=+1)
 
-    from pytential.symbolic.execution import _prepare_expr
-    sym_op_prep = _prepare_expr(places, sym_op, auto_where=dofdesc)
-
     if case.expn == "p2p":
-        from pytential.symbolic.matrix import P2PMatrixBuilder as MatrixBuilder
         wrangler = make_p2p_skeletonization_wrangler(
                 places, sym_op, sym_sigma,
                 auto_where=dofdesc)
     elif case.expn == "qbx":
-        from pytential.symbolic.matrix import MatrixBuilder
         wrangler = make_qbx_skeletonization_wrangler(
                 places, sym_op, sym_sigma,
                 auto_where=dofdesc)
     else:
         raise ValueError(f"unknown expansion: '{case.expn}'")
-
-    # mat = MatrixBuilder(
-    #     actx,
-    #     dep_expr=sym_sigma,
-    #     other_dep_exprs=[],
-    #     dep_source=qbx,
-    #     dep_discr=density_discr,
-    #     places=places,
-    #     context={},
-    #     _weighted=wrangler.weighted_sources)(sym_op_prep)
 
     # }}}
 
@@ -304,7 +284,27 @@ def run_error_model(ctx_factory, *,
                     jsource_near=jsource_near,
                     )
 
-    1/0
+    # }}}
+
+    # {{{ dense matrix
+
+    from pytools.obj_array import make_obj_array
+    from pytential.linalg.utils import make_index_list
+    tgt_index = make_index_list(make_obj_array([
+        cindex.cluster_indices(itarget),
+        cindex.cluster_indices(itarget),
+        ]))
+    src_index = make_index_list(make_obj_array([
+        cindex.cluster_indices(jsource_far),
+        cindex.cluster_indices(jsource_near),
+        ]))
+    dense_tgt_src_index = TargetAndSourceClusterList(tgt_index, src_index)
+
+    from pytential.linalg.utils import make_flat_cluster_diag
+    mat = wrangler._evaluate_expr(
+            actx, places, wrangler.neighbor_cluster_builder, dense_tgt_src_index,
+            wrangler.exprs[0], 0, _weighted=wrangler.weighted_sources)
+    mat = make_flat_cluster_diag(mat, dense_tgt_src_index)
 
     # }}}
 
@@ -349,10 +349,10 @@ def run_error_model(ctx_factory, *,
             skel_num_rank[i, j] = la.matrix_rank(tgt_mat, tol=case.id_eps)
 
             error_far[i, j] = far_cluster_target_skeletonization_error(
-                    mat, skeleton, i=itarget, j=jsource_far)
+                    mat[0, 0], skeleton, i=itarget, j=jsource_far)
             error_near[i, j] = near_cluster_target_skeletonization_error(
                     tgt.pxy.to_numpy(actx, stack_nodes=True),
-                    mat, skeleton, i=itarget, j=jsource_near)
+                    mat[1, 1], skeleton, i=itarget, j=jsource_near)
 
             logger.info(
                     "shape %4dx%4d nproxy %4d rank %4d / %4d far %.12e near %.12e",
