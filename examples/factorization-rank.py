@@ -108,7 +108,7 @@ class Geometry:
     group_cls_name = "simplex"
 
     # skeletonization
-    id_eps: float = 1.0e-15
+    id_eps: float = 1.0e-5
     nclusters: int = 6
     tree_kind = "adaptive-level-restricted"
 
@@ -244,6 +244,7 @@ def run_error_model(ctx_factory, *,
     # {{{ clusters
 
     from pytential.linalg import QBXProxyGenerator
+    # NOTE: this proxy generator is only constructed to get the centers
     proxy_generator = QBXProxyGenerator(places, radius_factor=1.0, approx_nproxy=8)
     pxy = proxy_generator(
             actx, dofdesc, tgt_src_index.sources, include_cluster_radii=True,
@@ -270,19 +271,33 @@ def run_error_model(ctx_factory, *,
 
     if visualize:
         if ambient_dim == 2:
-            plot_skeletonization_curve_geometry(
-                    actx, pxy, basename,
-                    itarget=itarget,
-                    jsource_far=jsource_far,
-                    jsource_near=jsource_near,
-                    )
+            plot_skeletonization_geometry = plot_skeletonization_curve_geometry
         else:
-            plot_skeletonization_surface_geometry(
-                    actx, pxy, basename,
-                    itarget=itarget,
-                    jsource_far=jsource_far,
-                    jsource_near=jsource_near,
-                    )
+            plot_skeletonization_geometry = plot_skeletonization_surface_geometry
+
+        plot_skeletonization_geometry(
+                actx, pxy, basename,
+                itarget=itarget,
+                jsource_far=jsource_far,
+                jsource_near=jsource_near,
+                )
+
+    # furthest target point
+    nodes = ds.get_discr_nodes(density_discr)
+    tgt_nodes = (
+            tgt_src_index.targets.cluster_take(nodes.T, itarget).T
+            - target_center.reshape(-1, 1)) / pxy.radii[itarget]
+
+    itarget_max = np.argmax(la.norm(tgt_nodes, axis=0))
+    logger.info("target %d point (%.5e, %.5e) distance %.5e",
+            itarget_max, *tgt_nodes[:, itarget_max],
+            la.norm(tgt_nodes[:, itarget_max]))
+
+    if visualize:
+        plot_complex_kernel(basename,
+                z0=tgt_nodes[0, itarget_max] + 1j * tgt_nodes[1, itarget_max])
+
+    1/0
 
     # }}}
 
@@ -314,19 +329,22 @@ def run_error_model(ctx_factory, *,
             _skeletonize_block_by_proxy_with_mats
 
     factors = np.linspace(1.0, 1.5, 4, endpoint=True)
+    id_tolerances = 10.0 ** -np.linspace(2, 15, 16)
     nproxies = np.logspace(
             np.log10(4),
             np.log10(n_cluster_sizes[itarget] + 128),
             12, dtype=np.int64)
+    shape = (factors.size, nproxies.size, id_tolerances.size)
 
-    skel_id_rank = np.empty((nproxies.size, factors.size), dtype=np.int64)
-    skel_num_rank = np.empty((nproxies.size, factors.size), dtype=np.int64)
+    skel_id_rank = np.empty(shape, dtype=np.int64)
+    skel_num_rank = np.empty(shape, dtype=np.int64)
+    error_far = np.empty(shape, dtype=np.float64)
+    error_near = np.empty(shape, dtype=np.float64)
 
-    error_far = np.empty((nproxies.size, factors.size), dtype=np.float64)
-    error_near = np.empty((nproxies.size, factors.size), dtype=np.float64)
-
-    for i, nproxy in enumerate(nproxies):
-        for j, proxy_radius_factor in enumerate(factors):
+    from itertools import product
+    for i, proxy_radius_factor in enumerate(factors):
+        for (j, nproxy), (k, id_eps) in product(
+                enumerate(nproxies), enumerate(id_tolerances)):
             proxy_generator = QBXProxyGenerator(places,
                     radius_factor=proxy_radius_factor,
                     approx_nproxy=nproxy)
@@ -334,7 +352,7 @@ def run_error_model(ctx_factory, *,
             L, R, skel_tgt_src_index, _, tgt = (                        # noqa: N806
                     _skeletonize_block_by_proxy_with_mats(
                         actx, 0, 0, places, proxy_generator, wrangler, tgt_src_index,
-                        id_eps=case.id_eps,
+                        id_eps=id_eps,
                         max_particles_in_box=max_particles_in_box))
             tgt_mat = np.hstack(tgt[itarget])
 
@@ -345,20 +363,21 @@ def run_error_model(ctx_factory, *,
                     skel_tgt_src_index=skel_tgt_src_index)
 
             # skeletonization rank
-            skel_id_rank[i, j] = L[itarget, itarget].shape[1]
-            skel_num_rank[i, j] = la.matrix_rank(tgt_mat, tol=case.id_eps)
+            skel_id_rank[i, j, k] = L[itarget, itarget].shape[1]
+            skel_num_rank[i, j, k] = la.matrix_rank(tgt_mat, tol=id_eps)
 
-            error_far[i, j] = far_cluster_target_skeletonization_error(
+            error_far[i, j, k] = far_cluster_target_skeletonization_error(
                     mat[0, 0], skeleton, i=itarget, j=jsource_far)
-            error_near[i, j] = near_cluster_target_skeletonization_error(
+            error_near[i, j, k] = near_cluster_target_skeletonization_error(
                     tgt.pxy.to_numpy(actx, stack_nodes=True),
                     mat[1, 1], skeleton, i=itarget, j=jsource_near)
 
             logger.info(
-                    "shape %4dx%4d nproxy %4d rank %4d / %4d far %.12e near %.12e",
-                    tgt_mat.shape[0], tgt_mat.shape[1], nproxy,
-                    skel_id_rank[i, j], skel_num_rank[i, j],
-                    error_far[i, j], error_near[i, j])
+                    "shape %4dx%4d nproxy %4d rank %4d / %4d "
+                    + "id_eps %.5e far %.12e near %.12e",
+                    tgt_mat.shape[0], tgt_mat.shape[1],
+                    nproxy, skel_id_rank[i, j, k], skel_num_rank[i, j, k],
+                    id_eps, error_far[i, j, k], error_near[i, j, k])
 
         logger.info("")
 
@@ -376,6 +395,7 @@ def run_error_model(ctx_factory, *,
             cluster_radii=pxy._cluster_radii,
             # skeletonization results
             proxy_factors=factors,
+            id_tolerances=id_tolerances,
             nproxies=nproxies,
             skel_id_rank=skel_id_rank,
             skel_num_rank=skel_num_rank,
@@ -478,6 +498,35 @@ def plot_skeletonization_surface_geometry(actx, pxy, basename, *,
         ], overwrite=True)
 
 
+def plot_complex_kernel(basename, *, z0):
+    def f(z):
+        return np.log(z0 - np.exp(1j * z))
+
+    import dsplayground as ds
+    fig = mp.figure()
+
+    import cplot
+    outfile = f"{basename}_complex"
+    with ds.axis(fig, outfile) as _:
+        cplot.plot(f,
+                (0.0, 2.0 * np.pi, 1024),
+                (-np.pi, np.pi, 1024))
+
+    outfile = f"{basename}_singularity"
+    with ds.axis(fig, outfile) as ax:
+        x = np.linspace(-1.0, 1.0, 512)
+        x, y = np.meshgrid(x, x)
+        mask = np.sqrt(x**2 + y**2) < 1.0
+
+        z = np.imag(-1j * np.log(x + 1j * y))
+        z[~mask] = np.nan
+
+        im = ax.contourf(x, y, z, levels=32)
+        ax.contour(x, y, z, colors="k", linewidths=(1,), levels=32)
+        ax.set_aspect("equal")
+        fig.colorbar(im, ax=ax, shrink=0.75)
+
+
 def plot_error_model(glob: Optional[str]) -> None:
     import pathlib
     for filename in pathlib.Path().glob(glob):
@@ -496,6 +545,7 @@ def _plot_error_model(filename: str) -> None:
     id_eps = d["id_eps"]
 
     factors = d["proxy_factors"]
+    id_tolerances = d["id_tolerances"]
     nproxies = d["nproxies"]
 
     centers = d["proxy_centers"]
@@ -513,84 +563,103 @@ def _plot_error_model(filename: str) -> None:
 
     import dsplayground as ds
     fig = mp.figure()
+    m_id_tolerances, m_nproxies = np.meshgrid(np.log10(id_tolerances), nproxies)
+
+    # {{{ decay coefficient
+
+    def _plot_decay(_ranks, _errors, suffix):
+        outfile = basename.with_stem(f"{basename.stem}_decay_{suffix}")
+        with ds.axis(fig, outfile) as ax:
+            a = np.empty(id_tolerances.shape)
+
+            # NOTE: after 8, the errors mostly bottom out
+            maxj = 6
+
+            for i in range(factors.size):
+                for k in range(a.size):
+                    rank = _ranks[i, :maxj, k]
+                    error = _errors[i, :maxj, k]
+
+                    coeffs = np.polyfit(-rank - 1, np.log(error), 1)
+                    a[k] = coeffs[-2]
+
+                ax.semilogx(id_tolerances, a, label=f"{factors[i]:.2f}")
+
+            ax.set_xlabel(r"$\epsilon_{ID}$")
+            ax.set_ylabel("$a$")
+            ax.set_ylim([0.0, 1.6])
+
+            ax.legend(
+                    title=title,
+                    bbox_to_anchor=(1.02, 0, 0.25, 1.0),
+                    loc="upper left", mode="expand",
+                    borderaxespad=0, ncol=1)
+
+    _plot_decay(d["skel_id_rank"], d["error_far"], "far")
+    _plot_decay(d["skel_id_rank"], d["error_near"], "near")
+
+    # }}}
 
     # {{{ plot rank
 
-    outfile = basename.with_stem(f"{basename.stem}_rank")
-    with ds.axis(fig, outfile) as ax:
-        max_rank = d["n_cluster_sizes"][itarget]
-
+    def _plot_rank_contour(_ranks):
         for i in range(factors.size):
-            line, = ax.plot(nproxies, d["skel_id_rank"][:, i], "v-",
-                    label=f"${factors[i]:.2f}$")
-            ax.plot(nproxies, d["skel_num_rank"][:, i], "^-",
-                    color=line.get_color())
+            outfile = basename.with_stem(f"{basename.stem}_rank_{i:02d}")
 
-        # ax.plot(nproxies, model_rank, "o-", label="$Model$")
-        ax.plot(nproxies, nproxies, "k:")
-        ax.axhline(max_rank, color="k", ls="--")
+            with ds.axis(fig, outfile) as ax:
+                im = ax.contourf(m_nproxies, m_id_tolerances, _ranks[i],
+                        levels=32)
+                ax.contour(m_nproxies, m_id_tolerances, _ranks[i],
+                        colors="k", linewidths=(1,), levels=32)
+                fig.colorbar(im, ax=ax)
 
-        ax.set_xlabel("$Proxy$")
-        ax.set_ylabel("$Rank$")
-        ax.legend(
-                title=title,
-                bbox_to_anchor=(1.02, 0, 0.25, 1.0),
-                loc="upper left", mode="expand",
-                borderaxespad=0, ncol=1)
+                ax.set_xlabel("$Proxy$")
+                ax.set_ylabel(r"$\epsilon_{ID}$")
+
+    # _plot_rank_contour(d["skel_id_rank"])
 
     # }}}
 
     # {{{ plot errors
 
-    outfile = basename.with_stem(f"{basename.stem}_error_far")
-    with ds.axis(fig, outfile) as ax:
-        ax.semilogy(nproxies, np.full(nproxies.shape, 1.0e-15), "k--")
+    def _plot_error(_errors, k, suffix):
+        outfile = basename.with_stem(f"{basename.stem}_error_{suffix}")
+        with ds.axis(fig, outfile) as ax:
+            for i in range(factors.size):
+                ax.semilogy(nproxies, _errors[i, :, k], "o-",
+                        label=f"{factors[i]:.2f}")
+
+            ax.axhline(id_tolerances[k], color="k", ls="--")
+            ax.set_xlabel(r"$Proxy$")
+            ax.set_ylabel("$Relative~ Error$")
+            ax.set_ylim([1.0e-16, 1.0])
+
+            ax.legend(
+                    title=title,
+                    bbox_to_anchor=(1.02, 0, 0.25, 1.0),
+                    loc="upper left", mode="expand",
+                    borderaxespad=0, ncol=1)
+
+    _plot_error(d["error_far"], 3, "far")
+    _plot_error(d["error_near"], 3, "near")
+
+    def _plot_error_contour(_errors, suffix):
         for i in range(factors.size):
-            p = 0.5 * d["skel_id_rank"][:, i]
+            outfile = basename.with_stem(f"{basename.stem}_error_{suffix}_{i:02d}")
+            with ds.axis(fig, outfile) as ax:
+                log_error = np.log10(_errors[i])
 
-            # NOTE: this also fixes the constant to match the actual error
-            error_model_far = rho**(p + 1) / (1 - rho) / (p + 1)
-            error_model_far *= np.max(d["error_far"][:, i]) / np.max(error_model_far)
-            error_model_far = np.clip(error_model_far, 1.0e-16, np.inf)
+                im = ax.contourf(m_nproxies, m_id_tolerances, log_error,
+                        levels=32)
+                ax.contour(m_nproxies, m_id_tolerances, log_error,
+                        colors="k", linewidths=(1,), levels=32)
+                fig.colorbar(im, ax=ax)
 
-            line, = ax.semilogy(nproxies, d["error_far"][:, i], "v-",
-                    label=f"${factors[i]:.2f}$")
-            ax.semilogy(nproxies, error_model_far, "--", color=line.get_color())
+                ax.set_xlabel("$Proxy$")
+                ax.set_ylabel(r"$\epsilon_{ID}$")
 
-        ax.set_ylim([1.0e-16, 1])
-        ax.set_xlabel("$Proxy$")
-        ax.set_ylabel("$Relative~ Error$")
-        ax.legend(
-                title=title,
-                bbox_to_anchor=(1.02, 0, 0.25, 1.0),
-                loc="upper left", mode="expand",
-                borderaxespad=0, ncol=1)
-
-    outfile = basename.with_stem(f"{basename.stem}_error_near")
-    with ds.axis(fig, outfile) as ax:
-        ax.semilogy(nproxies, np.full(nproxies.shape, 1.0e-15), "k--")
-        for i in range(factors.size):
-            p = 0.5 * d["skel_id_rank"][:, i]
-
-            alpha = factors[0] / factors[i] * (cradii / d["proxy_radii"])[itarget]
-            error_model_near = alpha**(p + 1) / (1 - alpha) / (p + 1)
-
-            # NOTE: this also fixes the constant to match the actual error
-            error_model_near *= np.max(d["error_near"][:, i]) / np.max(error_model_near)
-            error_model_near = np.clip(error_model_near, 1.0e-16, np.inf)
-
-            line, = ax.semilogy(nproxies, d["error_near"][:, i], "v-",
-                    label=f"${factors[i]:.2f}$")
-            ax.semilogy(nproxies, error_model_near, "--", color=line.get_color())
-
-        ax.set_ylim([1.0e-16, 1])
-        ax.set_xlabel("$Proxy$")
-        ax.set_ylabel("$Relative~ Error$")
-        ax.legend(
-                title=title,
-                bbox_to_anchor=(1.02, 0, 0.25, 1.0),
-                loc="upper left", mode="expand",
-                borderaxespad=0, ncol=1)
+    # _plot_error_contour(d["error_far"], "far")
+    # _plot_error_contour(d["error_near"], "near")
 
     # }}}
 
